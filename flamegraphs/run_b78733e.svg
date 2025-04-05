@@ -1,0 +1,3130 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="2134" onload="init(evt)" viewBox="0 0 1200 2134" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="2134.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="2117" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="2117" > </text>
+<g id="frames">
+<g >
+<title>unlink_chunk.isra.0 (1,313,131,300 samples, 0.16%)</title><rect x="861.8" y="1957" width="1.8" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="864.80" y="1967.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="517" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="527.5" ></text>
+</g>
+<g >
+<title>unsigned long from_inner_to_column&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; &gt; (8,383,838,300 samples, 0.99%)</title><rect x="1164.2" y="2053" width="11.7" height="15.0" fill="rgb(231,120,28)" rx="2" ry="2" />
+<text  x="1167.19" y="2063.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;int, std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;int&gt;, std::hash&lt;int&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::find (4,868,686,820 samples, 0.58%)</title><rect x="638.4" y="2005" width="6.8" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="641.41" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,333,333,310 samples, 0.28%)</title><rect x="613.4" y="1221" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1231.5" ></text>
+</g>
+<g >
+<title>_int_malloc (171,717,170 samples, 0.02%)</title><rect x="792.9" y="1989" width="0.3" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="795.94" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (3,131,313,100 samples, 0.37%)</title><rect x="859.3" y="1989" width="4.4" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="862.29" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free (90,909,090 samples, 0.01%)</title><rect x="887.4" y="1973" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="890.45" y="1983.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (80,808,080 samples, 0.01%)</title><rect x="432.1" y="1989" width="0.1" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="435.09" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb_je_tcache_flush (141,414,140 samples, 0.02%)</title><rect x="685.4" y="2021" width="0.2" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="688.44" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::HashBytes (494,949,490 samples, 0.06%)</title><rect x="799.4" y="2037" width="0.7" height="15.0" fill="rgb(243,177,42)" rx="2" ry="2" />
+<text  x="802.41" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,373,737,350 samples, 0.28%)</title><rect x="613.4" y="1557" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1567.5" ></text>
+</g>
+<g >
+<title>malloc (90,909,090 samples, 0.01%)</title><rect x="1189.9" y="2021" width="0.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1192.87" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorCacheBuffer::ResetFromCache (232,323,230 samples, 0.03%)</title><rect x="830.3" y="2005" width="0.4" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="833.35" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,303,030,280 samples, 0.27%)</title><rect x="613.4" y="149" width="3.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="159.5" ></text>
+</g>
+<g >
+<title>Contest::execute (80,808,080 samples, 0.01%)</title><rect x="589.0" y="2005" width="0.1" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="592.02" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="917" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="927.5" ></text>
+</g>
+<g >
+<title>void duckdb::RLEFilter&lt;int&gt; (131,313,130 samples, 0.02%)</title><rect x="900.6" y="2037" width="0.2" height="15.0" fill="rgb(233,129,31)" rx="2" ry="2" />
+<text  x="903.59" y="2047.5" ></text>
+</g>
+<g >
+<title>re2::RE2::Match (1,777,777,760 samples, 0.21%)</title><rect x="948.3" y="2053" width="2.5" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="951.29" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="485" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="495.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_trylock@@GLIBC_2.34 (80,808,080 samples, 0.01%)</title><rect x="685.5" y="1989" width="0.1" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="688.52" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb_fastpforlib::internal::__fastunpack2 (101,010,100 samples, 0.01%)</title><rect x="832.4" y="2037" width="0.1" height="15.0" fill="rgb(229,113,27)" rx="2" ry="2" />
+<text  x="835.36" y="2047.5" ></text>
+</g>
+<g >
+<title>bool duckdb_moodycamel::ConcurrentQueue&lt;duckdb::shared_ptr&lt;duckdb::Task, true&gt;, duckdb_moodycamel::ConcurrentQueueDefaultTraits&gt;::ExplicitProducer::dequeue&lt;duckdb::shared_ptr&lt;duckdb::Task, true&gt; &gt; (111,111,110 samples, 0.01%)</title><rect x="761.7" y="2037" width="0.2" height="15.0" fill="rgb(252,216,51)" rx="2" ry="2" />
+<text  x="764.72" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (131,313,130 samples, 0.02%)</title><rect x="682.2" y="1989" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="685.20" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_malloc (6,909,090,840 samples, 0.82%)</title><rect x="577.6" y="1973" width="9.7" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="580.64" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,272,727,230 samples, 0.51%)</title><rect x="811.4" y="2005" width="6.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="814.42" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,838,383,810 samples, 0.34%)</title><rect x="613.3" y="1893" width="4.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1903.5" ></text>
+</g>
+<g >
+<title>Table::to_columnar (141,414,140 samples, 0.02%)</title><rect x="66.3" y="2053" width="0.2" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="69.27" y="2063.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (56,808,080,240 samples, 6.73%)</title><rect x="135.8" y="2021" width="79.4" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="138.80" y="2031.5" >cfree@GLI..</text>
+</g>
+<g >
+<title>duckdb_fastpforlib::internal::__fastunpack7 (151,515,150 samples, 0.02%)</title><rect x="940.9" y="2053" width="0.2" height="15.0" fill="rgb(247,194,46)" rx="2" ry="2" />
+<text  x="943.92" y="2063.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt;::_M_realloc_insert&lt;unsigned long const&amp;&gt; (151,515,150 samples, 0.02%)</title><rect x="752.6" y="2021" width="0.2" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="755.55" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::HashJoinOperatorState::~HashJoinOperatorState (4,484,848,440 samples, 0.53%)</title><rect x="800.2" y="2037" width="6.3" height="15.0" fill="rgb(226,98,23)" rx="2" ry="2" />
+<text  x="803.19" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (22,808,080,580 samples, 2.70%)</title><rect x="1112.1" y="2021" width="31.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1115.11" y="2031.5" >ma..</text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="949" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="959.5" ></text>
+</g>
+<g >
+<title>operator new (242,424,240 samples, 0.03%)</title><rect x="829.7" y="2021" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="832.69" y="2031.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (2,222,222,200 samples, 0.26%)</title><rect x="676.7" y="2005" width="3.1" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="679.68" y="2015.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (1,393,939,380 samples, 0.17%)</title><rect x="561.8" y="2005" width="1.9" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="564.79" y="2015.5" ></text>
+</g>
+<g >
+<title>operator new (1,151,515,140 samples, 0.14%)</title><rect x="215.3" y="2021" width="1.6" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="218.29" y="2031.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (343,434,340 samples, 0.04%)</title><rect x="551.1" y="2005" width="0.5" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="554.09" y="2015.5" ></text>
+</g>
+<g >
+<title>malloc@plt (272,727,270 samples, 0.03%)</title><rect x="26.1" y="2037" width="0.4" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="29.08" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="277" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="287.5" ></text>
+</g>
+<g >
+<title>operator new (5,858,585,800 samples, 0.69%)</title><rect x="890.5" y="2021" width="8.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="893.54" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (111,111,110 samples, 0.01%)</title><rect x="810.3" y="2021" width="0.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="813.32" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (101,010,100 samples, 0.01%)</title><rect x="563.3" y="1973" width="0.1" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="566.30" y="1983.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorOperations::Copy (191,919,190 samples, 0.02%)</title><rect x="938.3" y="2037" width="0.2" height="15.0" fill="rgb(250,208,49)" rx="2" ry="2" />
+<text  x="941.28" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_malloc (26,323,232,060 samples, 3.12%)</title><rect x="473.9" y="1989" width="36.8" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="476.91" y="1999.5" >_in..</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (121,212,120 samples, 0.01%)</title><rect x="588.4" y="2005" width="0.1" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="591.37" y="2015.5" ></text>
+</g>
+<g >
+<title>void duckdb::FilterSelectionSwitch&lt;int&gt; (4,151,515,110 samples, 0.49%)</title><rect x="1181.6" y="2053" width="5.8" height="15.0" fill="rgb(222,79,18)" rx="2" ry="2" />
+<text  x="1184.57" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="629" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="639.5" ></text>
+</g>
+<g >
+<title>duckdb_fsst_decompress (2,939,393,910 samples, 0.35%)</title><rect x="833.7" y="2037" width="4.1" height="15.0" fill="rgb(223,83,20)" rx="2" ry="2" />
+<text  x="836.70" y="2047.5" ></text>
+</g>
+<g >
+<title>TableParser&lt;Table::from_csv (676,767,670 samples, 0.08%)</title><rect x="587.6" y="2021" width="0.9" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="590.60" y="2031.5" ></text>
+</g>
+<g >
+<title>std::pair&lt;std::__detail::_Node_iterator&lt;duckdb::MetricsType, true, true&gt;, bool&gt; std::_Hashtable&lt;duckdb::MetricsType, duckdb::MetricsType, std::allocator&lt;duckdb::MetricsType&gt;, std::__detail::_Identity, std::equal_to&lt;duckdb::MetricsType&gt;, duckdb::MetricsTypeHashFunction, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;true, true, true&gt; &gt;::_M_insert_unique&lt;duckdb::MetricsType const&amp;, duckdb::MetricsType const&amp;, std::__detail::_AllocNode&lt;std::allocator&lt;std::__detail::_Hash_node&lt;duckdb::MetricsType, true&gt; &gt; &gt; &gt; (292,929,290 samples, 0.03%)</title><rect x="1145.2" y="2053" width="0.4" height="15.0" fill="rgb(227,105,25)" rx="2" ry="2" />
+<text  x="1148.19" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1493" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1503.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,434,343,410 samples, 0.29%)</title><rect x="613.3" y="1637" width="3.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1647.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (1,040,404,030 samples, 0.12%)</title><rect x="96.6" y="1957" width="1.5" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="99.60" y="1967.5" ></text>
+</g>
+<g >
+<title>duckdb::UncompressedStringStorage::StringScanPartial (353,535,350 samples, 0.04%)</title><rect x="828.4" y="2037" width="0.5" height="15.0" fill="rgb(205,3,0)" rx="2" ry="2" />
+<text  x="831.44" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (8,767,676,680 samples, 1.04%)</title><rect x="85.9" y="1989" width="12.3" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="88.89" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (202,020,200 samples, 0.02%)</title><rect x="563.4" y="1973" width="0.3" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="566.44" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="613" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="623.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="309" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="319.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1253" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1263.5" ></text>
+</g>
+<g >
+<title>Table::from_columnar (11,414,141,300 samples, 1.35%)</title><rect x="594.3" y="2005" width="15.9" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="597.26" y="2015.5" ></text>
+</g>
+<g >
+<title>memcpy@plt (101,010,100 samples, 0.01%)</title><rect x="685.9" y="2021" width="0.2" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="688.93" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb_fastpforlib::internal::__fastunpack22 (757,575,750 samples, 0.09%)</title><rect x="832.6" y="2037" width="1.0" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="835.58" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1125" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1135.5" ></text>
+</g>
+<g >
+<title>_int_malloc (111,111,110 samples, 0.01%)</title><rect x="736.7" y="1973" width="0.1" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="739.69" y="1983.5" ></text>
+</g>
+<g >
+<title>void duckdb::TupleDataTemplatedScatter&lt;duckdb::string_t&gt; (626,262,620 samples, 0.07%)</title><rect x="1188.4" y="2053" width="0.9" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="1191.43" y="2063.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (5,232,323,180 samples, 0.62%)</title><rect x="530.2" y="1941" width="7.3" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="533.20" y="1951.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@@GLIBC_2.2.5 (90,909,090 samples, 0.01%)</title><rect x="793.8" y="1989" width="0.2" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="796.83" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorBuffer::CreateStandardVector (424,242,420 samples, 0.05%)</title><rect x="631.6" y="2005" width="0.6" height="15.0" fill="rgb(235,142,33)" rx="2" ry="2" />
+<text  x="634.57" y="2015.5" ></text>
+</g>
+<g >
+<title>malloc (373,737,370 samples, 0.04%)</title><rect x="563.7" y="2005" width="0.6" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="566.74" y="2015.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;int, std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;int&gt;, std::hash&lt;int&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::find (919,191,910 samples, 0.11%)</title><rect x="884.8" y="2037" width="1.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="887.85" y="2047.5" ></text>
+</g>
+<g >
+<title>emap_try_acquire_edata_neighbor_impl (90,909,090 samples, 0.01%)</title><rect x="841.1" y="2037" width="0.1" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="844.07" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::LikeMatcher::Match (141,414,140 samples, 0.02%)</title><rect x="931.6" y="2053" width="0.2" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="934.62" y="2063.5" ></text>
+</g>
+<g >
+<title>duckdb::Checksum (242,424,240 samples, 0.03%)</title><rect x="920.5" y="2053" width="0.3" height="15.0" fill="rgb(211,32,7)" rx="2" ry="2" />
+<text  x="923.49" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,282,828,250 samples, 0.39%)</title><rect x="613.0" y="1957" width="4.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="615.97" y="1967.5" ></text>
+</g>
+<g >
+<title>[unknown] (353,535,350 samples, 0.04%)</title><rect x="886.7" y="2021" width="0.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="889.74" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (12,878,787,750 samples, 1.53%)</title><rect x="414.0" y="1989" width="18.0" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="417.04" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="501" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="511.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (2,111,111,090 samples, 0.25%)</title><rect x="784.0" y="1989" width="3.0" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="787.03" y="1999.5" ></text>
+</g>
+<g >
+<title>bool re2::DFA::InlinedSearchLoop&lt;false, false, true&gt; (12,222,222,100 samples, 1.45%)</title><rect x="761.9" y="2037" width="17.1" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="764.88" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,333,333,310 samples, 0.28%)</title><rect x="613.4" y="1205" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1215.5" ></text>
+</g>
+<g >
+<title>operator new (737,373,730 samples, 0.09%)</title><rect x="687.0" y="2021" width="1.0" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="689.99" y="2031.5" ></text>
+</g>
+<g >
+<title>bool std::__lexicographical_compare_impl&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; const*, std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; const*, __gnu_cxx::__ops::_Iter_less_iter&gt; (373,737,370 samples, 0.04%)</title><rect x="779.0" y="2037" width="0.5" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="781.97" y="2047.5" ></text>
+</g>
+<g >
+<title>__default_morecore@GLIBC_2.2.5 (111,111,110 samples, 0.01%)</title><rect x="65.8" y="1989" width="0.1" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="68.76" y="1999.5" ></text>
+</g>
+<g >
+<title>malloc (141,414,140 samples, 0.02%)</title><rect x="1175.7" y="2021" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1178.72" y="2031.5" ></text>
+</g>
+<g >
+<title>void std::__introsort_loop&lt;__gnu_cxx::__normal_iterator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;*, std::vector&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; &gt; &gt;, long, __gnu_cxx::__ops::_Iter_less_iter&gt; (252,525,250 samples, 0.03%)</title><rect x="900.9" y="2037" width="0.4" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="903.91" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_free (3,222,222,190 samples, 0.38%)</title><rect x="859.2" y="2005" width="4.5" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="862.22" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,919,191,880 samples, 0.46%)</title><rect x="612.6" y="1989" width="5.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="615.64" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="453" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="463.5" ></text>
+</g>
+<g >
+<title>Comparison::like_match (5,121,212,070 samples, 0.61%)</title><rect x="16.2" y="2053" width="7.2" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="19.23" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="789" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="799.5" ></text>
+</g>
+<g >
+<title>std::pair&lt;std::__detail::_Node_iterator&lt;std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt;, false, false&gt;, bool&gt; std::_Hashtable&lt;int, std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;int&gt;, std::hash&lt;int&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::_M_emplace&lt;int const&amp;, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt; (393,939,390 samples, 0.05%)</title><rect x="888.0" y="2037" width="0.5" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="890.96" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="229" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="239.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (121,212,120 samples, 0.01%)</title><rect x="623.9" y="1989" width="0.1" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="626.86" y="1999.5" ></text>
+</g>
+<g >
+<title>malloc (252,525,250 samples, 0.03%)</title><rect x="1145.2" y="2021" width="0.4" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1148.25" y="2031.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; &gt;::_M_realloc_insert&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; (1,444,444,430 samples, 0.17%)</title><rect x="750.5" y="2021" width="2.1" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="753.53" y="2031.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (8,686,868,600 samples, 1.03%)</title><rect x="85.9" y="1973" width="12.2" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="88.90" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="709" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="719.5" ></text>
+</g>
+<g >
+<title>operator new (252,525,250 samples, 0.03%)</title><rect x="1145.2" y="2037" width="0.4" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1148.25" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::PipelineExecutor::Execute (90,909,090 samples, 0.01%)</title><rect x="932.1" y="2053" width="0.1" height="15.0" fill="rgb(251,212,50)" rx="2" ry="2" />
+<text  x="935.06" y="2063.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_create (353,535,350 samples, 0.04%)</title><rect x="1144.4" y="2053" width="0.5" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="1147.43" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (1,404,040,390 samples, 0.17%)</title><rect x="613.4" y="53" width="2.0" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.43" y="63.5" ></text>
+</g>
+<g >
+<title>operator new (202,020,200 samples, 0.02%)</title><rect x="888.2" y="2021" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="891.20" y="2031.5" ></text>
+</g>
+<g >
+<title>re2::Prog::SearchDFA (202,020,200 samples, 0.02%)</title><rect x="945.1" y="2053" width="0.3" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="948.11" y="2063.5" ></text>
+</g>
+<g >
+<title>_int_malloc (474,747,470 samples, 0.06%)</title><rect x="735.9" y="1973" width="0.6" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="738.86" y="1983.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (3,999,999,960 samples, 0.47%)</title><rect x="781.4" y="2021" width="5.6" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="784.39" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::TupleDataChunkIterator::Next (90,909,090 samples, 0.01%)</title><rect x="936.9" y="2053" width="0.1" height="15.0" fill="rgb(207,9,2)" rx="2" ry="2" />
+<text  x="939.86" y="2063.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;::reserve (3,161,616,130 samples, 0.37%)</title><rect x="645.5" y="2005" width="4.5" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="648.54" y="2015.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (878,787,870 samples, 0.10%)</title><rect x="826.3" y="1989" width="1.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="829.27" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::Vector::Reinterpret (141,414,140 samples, 0.02%)</title><rect x="829.3" y="2037" width="0.2" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="832.30" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,333,333,310 samples, 0.28%)</title><rect x="613.4" y="1189" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1199.5" ></text>
+</g>
+<g >
+<title>Contest::execute_hash_join[abi:cxx11] (1,262,626,250 samples, 0.15%)</title><rect x="589.1" y="2005" width="1.8" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="592.14" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,606,060,580 samples, 0.31%)</title><rect x="613.3" y="1797" width="3.7" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1807.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="357" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="367.5" ></text>
+</g>
+<g >
+<title>re2::Prog::SearchOnePass (141,414,140 samples, 0.02%)</title><rect x="859.0" y="2037" width="0.2" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="862.01" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_malloc (666,666,660 samples, 0.08%)</title><rect x="609.3" y="1957" width="0.9" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="612.25" y="1967.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,333,333,310 samples, 0.28%)</title><rect x="613.4" y="1237" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1247.5" ></text>
+</g>
+<g >
+<title>operator new (111,111,110 samples, 0.01%)</title><rect x="889.3" y="2021" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="892.30" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1429" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1439.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,474,747,450 samples, 0.29%)</title><rect x="613.3" y="1701" width="3.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1711.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (202,020,200 samples, 0.02%)</title><rect x="682.6" y="1989" width="0.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="685.64" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb_fsst_decompress (525,252,520 samples, 0.06%)</title><rect x="941.3" y="2053" width="0.7" height="15.0" fill="rgb(223,83,20)" rx="2" ry="2" />
+<text  x="944.29" y="2063.5" ></text>
+</g>
+<g >
+<title>void duckdb::TupleDataTemplatedGather&lt;duckdb::string_t&gt; (252,525,250 samples, 0.03%)</title><rect x="1187.7" y="2053" width="0.3" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="1190.67" y="2063.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (676,767,670 samples, 0.08%)</title><rect x="786.0" y="1957" width="1.0" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="789.02" y="1967.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,616,161,590 samples, 0.31%)</title><rect x="613.3" y="1813" width="3.7" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1823.5" ></text>
+</g>
+<g >
+<title>[unknown] (464,646,460 samples, 0.06%)</title><rect x="796.4" y="2021" width="0.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="799.39" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (1,191,919,180 samples, 0.14%)</title><rect x="589.2" y="1957" width="1.7" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="592.24" y="1967.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1013" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1023.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="933" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="943.5" ></text>
+</g>
+<g >
+<title>_int_free (101,010,100 samples, 0.01%)</title><rect x="630.8" y="1973" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="633.82" y="1983.5" ></text>
+</g>
+<g >
+<title>operator new (131,313,130 samples, 0.02%)</title><rect x="749.6" y="2005" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="752.57" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::DatabaseInstance::GetScheduler (111,111,110 samples, 0.01%)</title><rect x="923.1" y="2053" width="0.1" height="15.0" fill="rgb(254,225,53)" rx="2" ry="2" />
+<text  x="926.09" y="2063.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (121,212,120 samples, 0.01%)</title><rect x="887.4" y="1989" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="890.41" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (36,454,545,090 samples, 4.32%)</title><rect x="156.0" y="1989" width="51.0" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="158.97" y="1999.5" >_int_..</text>
+</g>
+<g >
+<title>std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;&amp; std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;::emplace_back&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;&amp;&gt; (2,646,464,620 samples, 0.31%)</title><rect x="732.2" y="2021" width="3.7" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="735.15" y="2031.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (272,727,270 samples, 0.03%)</title><rect x="537.5" y="1957" width="0.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="540.52" y="1967.5" ></text>
+</g>
+<g >
+<title>duckdb::CollectionScanState::Scan (454,545,450 samples, 0.05%)</title><rect x="796.4" y="2005" width="0.6" height="15.0" fill="rgb(221,74,17)" rx="2" ry="2" />
+<text  x="799.40" y="2015.5" ></text>
+</g>
+<g >
+<title>void duckdb::PerfectHashJoinExecutor::TemplatedFillSelectionVectorProbe&lt;int&gt; (161,616,160 samples, 0.02%)</title><rect x="1187.4" y="2053" width="0.3" height="15.0" fill="rgb(238,154,36)" rx="2" ry="2" />
+<text  x="1190.43" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc (90,909,090 samples, 0.01%)</title><rect x="886.8" y="1973" width="0.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="889.76" y="1983.5" ></text>
+</g>
+<g >
+<title>duckdb::FSSTPrimitives::DecompressValue (424,242,420 samples, 0.05%)</title><rect x="797.8" y="2037" width="0.6" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="800.77" y="2047.5" ></text>
+</g>
+<g >
+<title>__memchr_evex (535,353,530 samples, 0.06%)</title><rect x="752.9" y="2037" width="0.7" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="755.85" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (1,151,515,140 samples, 0.14%)</title><rect x="589.2" y="1941" width="1.6" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="592.24" y="1951.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (23,222,221,990 samples, 2.75%)</title><rect x="381.1" y="1957" width="32.5" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="384.09" y="1967.5" >un..</text>
+</g>
+<g >
+<title>std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;::reserve (151,515,150 samples, 0.02%)</title><rect x="626.7" y="1989" width="0.2" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="629.73" y="1999.5" ></text>
+</g>
+<g >
+<title>malloc (80,808,080 samples, 0.01%)</title><rect x="1111.3" y="2037" width="0.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1114.27" y="2047.5" ></text>
+</g>
+<g >
+<title>__memmove_avx512_unaligned_erms (4,050,505,010 samples, 0.48%)</title><rect x="753.9" y="2037" width="5.6" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="756.87" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_malloc (252,525,250 samples, 0.03%)</title><rect x="735.5" y="1973" width="0.3" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="738.47" y="1983.5" ></text>
+</g>
+<g >
+<title>void duckdb::BitpackingScanPartial&lt;int, int, unsigned int&gt; (676,767,670 samples, 0.08%)</title><rect x="899.0" y="2037" width="1.0" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="902.00" y="2047.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (292,929,290 samples, 0.03%)</title><rect x="919.6" y="1973" width="0.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="922.59" y="1983.5" ></text>
+</g>
+<g >
+<title>_int_malloc (202,020,200 samples, 0.02%)</title><rect x="612.3" y="1941" width="0.3" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="615.33" y="1951.5" ></text>
+</g>
+<g >
+<title>duckdb::StandardBufferManager::BufferAllocatorFree (222,222,220 samples, 0.03%)</title><rect x="811.1" y="2037" width="0.3" height="15.0" fill="rgb(237,150,35)" rx="2" ry="2" />
+<text  x="814.05" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="853" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="863.5" ></text>
+</g>
+<g >
+<title>re2::RE2::DoMatch (959,595,950 samples, 0.11%)</title><rect x="946.1" y="2037" width="1.3" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="949.09" y="2047.5" ></text>
+</g>
+<g >
+<title>operator new (101,010,100 samples, 0.01%)</title><rect x="1189.9" y="2037" width="0.1" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1192.86" y="2047.5" ></text>
+</g>
+<g >
+<title>void duckdb::RLESelect&lt;int&gt; (1,202,020,190 samples, 0.14%)</title><rect x="808.6" y="2005" width="1.7" height="15.0" fill="rgb(221,78,18)" rx="2" ry="2" />
+<text  x="811.62" y="2015.5" ></text>
+</g>
+<g >
+<title>all (843,737,365,300 samples, 100%)</title><rect x="10.0" y="2085" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="2095.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="565" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="575.5" ></text>
+</g>
+<g >
+<title>duckdb::StringVector::AddStringOrBlob (2,808,080,780 samples, 0.33%)</title><rect x="932.6" y="2053" width="3.9" height="15.0" fill="rgb(217,58,14)" rx="2" ry="2" />
+<text  x="935.56" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (44,444,444,000 samples, 5.27%)</title><rect x="588.5" y="2021" width="62.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="591.54" y="2031.5" >[unkno..</text>
+</g>
+<g >
+<title>_int_free (161,616,160 samples, 0.02%)</title><rect x="516.8" y="2005" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="519.81" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::ContainsGeneric (353,535,350 samples, 0.04%)</title><rect x="922.1" y="2053" width="0.5" height="15.0" fill="rgb(206,4,1)" rx="2" ry="2" />
+<text  x="925.13" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1317" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1327.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (474,747,470 samples, 0.06%)</title><rect x="735.9" y="1957" width="0.6" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="738.86" y="1967.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1477" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1487.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorBuffer::~VectorBuffer (121,212,120 samples, 0.01%)</title><rect x="887.4" y="2005" width="0.2" height="15.0" fill="rgb(210,27,6)" rx="2" ry="2" />
+<text  x="890.41" y="2015.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;duckdb::TupleDataAllocator, std::allocator&lt;void&gt;,  (80,808,080 samples, 0.01%)</title><rect x="887.3" y="2037" width="0.1" height="15.0" fill="rgb(220,69,16)" rx="2" ry="2" />
+<text  x="890.28" y="2047.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (272,727,270 samples, 0.03%)</title><rect x="206.6" y="1973" width="0.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="209.57" y="1983.5" ></text>
+</g>
+<g >
+<title>_int_malloc (191,919,190 samples, 0.02%)</title><rect x="829.8" y="1989" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="832.76" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="325" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="335.5" ></text>
+</g>
+<g >
+<title>operator new (2,333,333,310 samples, 0.28%)</title><rect x="646.7" y="1989" width="3.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="649.70" y="1999.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (212,121,210 samples, 0.03%)</title><rect x="691.6" y="1941" width="0.3" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="694.57" y="1951.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,959,595,930 samples, 0.35%)</title><rect x="613.3" y="1925" width="4.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1935.5" ></text>
+</g>
+<g >
+<title>void duckdb::TupleDataTemplatedScatter&lt;int&gt; (202,020,200 samples, 0.02%)</title><rect x="749.9" y="2021" width="0.3" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="752.93" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::LikeMatcher::Match (222,222,220 samples, 0.03%)</title><rect x="806.6" y="2037" width="0.3" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="809.63" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1077" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1087.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,464,646,440 samples, 0.29%)</title><rect x="613.3" y="1653" width="3.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1663.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,474,747,450 samples, 0.29%)</title><rect x="613.3" y="1685" width="3.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1695.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="693" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="703.5" ></text>
+</g>
+<g >
+<title>duckdb::FSSTStorage::FetchStringPointer (454,545,450 samples, 0.05%)</title><rect x="924.2" y="2053" width="0.6" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="927.16" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="245" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="255.5" ></text>
+</g>
+<g >
+<title>operator new (141,414,140 samples, 0.02%)</title><rect x="626.7" y="1973" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="629.74" y="1983.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (12,353,535,230 samples, 1.46%)</title><rect x="520.6" y="1973" width="17.3" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="523.62" y="1983.5" ></text>
+</g>
+<g >
+<title>duckdb::StringHeap::EmptyString (1,818,181,800 samples, 0.22%)</title><rect x="820.2" y="2037" width="2.5" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="823.21" y="2047.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (1,424,242,410 samples, 0.17%)</title><rect x="624.5" y="1989" width="2.0" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="627.52" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (818,181,810 samples, 0.10%)</title><rect x="918.9" y="2005" width="1.2" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="921.94" y="2015.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_create (161,616,160 samples, 0.02%)</title><rect x="887.7" y="2037" width="0.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="890.70" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::StringHeap::AddBlob (1,888,888,870 samples, 0.22%)</title><rect x="817.6" y="2037" width="2.6" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="820.56" y="2047.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (404,040,400 samples, 0.05%)</title><rect x="514.8" y="2005" width="0.6" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="517.80" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::SelectionData::SelectionData (90,909,090 samples, 0.01%)</title><rect x="886.8" y="2005" width="0.1" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="889.76" y="2015.5" ></text>
+</g>
+<g >
+<title>__malloc_trim (2,474,747,450 samples, 0.29%)</title><rect x="824.0" y="2021" width="3.5" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="827.05" y="2031.5" ></text>
+</g>
+<g >
+<title>alloc_perturb (222,222,220 samples, 0.03%)</title><rect x="749.3" y="1973" width="0.3" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="752.26" y="1983.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (212,121,210 samples, 0.03%)</title><rect x="631.9" y="1941" width="0.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="634.87" y="1951.5" ></text>
+</g>
+<g >
+<title>_int_free (555,555,550 samples, 0.07%)</title><rect x="691.1" y="1989" width="0.8" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="694.12" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (151,515,150 samples, 0.02%)</title><rect x="537.9" y="1973" width="0.2" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="540.90" y="1983.5" ></text>
+</g>
+<g >
+<title>__new_sem_wait_slow64.constprop.0 (141,414,140 samples, 0.02%)</title><rect x="827.5" y="2021" width="0.2" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="830.51" y="2031.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (757,575,750 samples, 0.09%)</title><rect x="918.9" y="1989" width="1.1" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="921.94" y="1999.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;* std::__do_uninit_copy&lt;__gnu_cxx::__normal_iterator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; const*, std::vector&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; &gt; &gt;, std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;*&gt; (222,222,220 samples, 0.03%)</title><rect x="736.5" y="2021" width="0.4" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="739.55" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,303,030,280 samples, 0.27%)</title><rect x="613.4" y="165" width="3.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="175.5" ></text>
+</g>
+<g >
+<title>_int_free (80,808,080 samples, 0.01%)</title><rect x="589.0" y="1973" width="0.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="592.02" y="1983.5" ></text>
+</g>
+<g >
+<title>malloc (1,818,181,800 samples, 0.22%)</title><rect x="607.7" y="1973" width="2.5" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="610.68" y="1983.5" ></text>
+</g>
+<g >
+<title>Contest::execute_scan[abi:cxx11] (9,626,262,530 samples, 1.14%)</title><rect x="538.1" y="2021" width="13.5" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="541.13" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free (3,989,898,950 samples, 0.47%)</title><rect x="781.4" y="2005" width="5.6" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="784.40" y="2015.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (212,121,210 samples, 0.03%)</title><rect x="736.2" y="1941" width="0.3" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="739.22" y="1951.5" ></text>
+</g>
+<g >
+<title>duckdb::Utf8Proc::Analyze (272,727,270 samples, 0.03%)</title><rect x="683.7" y="2021" width="0.4" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="686.70" y="2031.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (2,101,010,080 samples, 0.25%)</title><rect x="784.0" y="1973" width="3.0" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="787.03" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (170,232,321,530 samples, 20.18%)</title><rect x="514.7" y="2037" width="238.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="517.75" y="2047.5" >[unknown]</text>
+</g>
+<g >
+<title>duckdb::ColumnSegment::FilterSelection (252,525,250 samples, 0.03%)</title><rect x="921.1" y="2053" width="0.4" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="924.14" y="2063.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorOperations::Copy (282,828,280 samples, 0.03%)</title><rect x="938.1" y="2053" width="0.4" height="15.0" fill="rgb(250,208,49)" rx="2" ry="2" />
+<text  x="941.15" y="2063.5" ></text>
+</g>
+<g >
+<title>_int_free (90,909,090 samples, 0.01%)</title><rect x="1144.2" y="2021" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="1147.24" y="2031.5" ></text>
+</g>
+<g >
+<title>alloc_perturb (90,909,090 samples, 0.01%)</title><rect x="1143.9" y="2005" width="0.1" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="1146.88" y="2015.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::basic_string (90,909,090 samples, 0.01%)</title><rect x="731.8" y="2021" width="0.2" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="734.83" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="389" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="399.5" ></text>
+</g>
+<g >
+<title>duckdb::InitializeValidityMask (121,212,120 samples, 0.01%)</title><rect x="928.4" y="2053" width="0.2" height="15.0" fill="rgb(249,206,49)" rx="2" ry="2" />
+<text  x="931.43" y="2063.5" ></text>
+</g>
+<g >
+<title>__GI___futex_abstimed_wait_cancelable64 (80,808,080 samples, 0.01%)</title><rect x="827.6" y="2005" width="0.1" height="15.0" fill="rgb(215,48,11)" rx="2" ry="2" />
+<text  x="830.57" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::PendingQueryResult::IsResultReady (90,909,090 samples, 0.01%)</title><rect x="807.6" y="2005" width="0.1" height="15.0" fill="rgb(217,55,13)" rx="2" ry="2" />
+<text  x="810.58" y="2015.5" ></text>
+</g>
+<g >
+<title>malloc (101,010,100 samples, 0.01%)</title><rect x="889.1" y="2005" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="892.12" y="2015.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (111,111,110 samples, 0.01%)</title><rect x="630.8" y="1989" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="633.81" y="1999.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (18,575,757,390 samples, 2.20%)</title><rect x="72.5" y="2021" width="26.0" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="75.51" y="2031.5" >c..</text>
+</g>
+<g >
+<title>duckdb::JoinHashTable::Probe (4,353,535,310 samples, 0.52%)</title><rect x="800.3" y="1989" width="6.1" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="803.33" y="1999.5" ></text>
+</g>
+<g >
+<title>Table::from_columnar (25,747,474,490 samples, 3.05%)</title><rect x="551.6" y="2021" width="36.0" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="554.59" y="2031.5" >Tab..</text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (555,555,550 samples, 0.07%)</title><rect x="691.1" y="2005" width="0.8" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="694.12" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1061" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1071.5" ></text>
+</g>
+<g >
+<title>__memset_avx512_unaligned_erms (80,808,080 samples, 0.01%)</title><rect x="918.7" y="2053" width="0.1" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="921.67" y="2063.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@@GLIBC_2.2.5 (101,010,100 samples, 0.01%)</title><rect x="851.5" y="2037" width="0.2" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="854.53" y="2047.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@@GLIBC_2.2.5 (111,111,110 samples, 0.01%)</title><rect x="797.4" y="2021" width="0.1" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="800.39" y="2031.5" ></text>
+</g>
+<g >
+<title>operator new (1,848,484,830 samples, 0.22%)</title><rect x="607.6" y="1989" width="2.6" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="610.64" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_malloc (191,919,190 samples, 0.02%)</title><rect x="1145.3" y="2005" width="0.3" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="1148.33" y="2015.5" ></text>
+</g>
+<g >
+<title>operator new (90,909,090 samples, 0.01%)</title><rect x="886.8" y="1989" width="0.1" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="889.76" y="1999.5" ></text>
+</g>
+<g >
+<title>operator new (767,676,760 samples, 0.09%)</title><rect x="943.8" y="2053" width="1.1" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="946.79" y="2063.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (111,111,110 samples, 0.01%)</title><rect x="683.5" y="2005" width="0.1" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="686.47" y="2015.5" ></text>
+</g>
+<g >
+<title>Contest::execute_hash_join[abi:cxx11] (202,020,200 samples, 0.02%)</title><rect x="610.3" y="1989" width="0.3" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="613.28" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::MetaTransaction::GetTransaction (252,525,250 samples, 0.03%)</title><rect x="793.6" y="2005" width="0.4" height="15.0" fill="rgb(205,4,0)" rx="2" ry="2" />
+<text  x="796.61" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb_fastpforlib::internal::__fastunpack17 (111,111,110 samples, 0.01%)</title><rect x="832.2" y="2037" width="0.1" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="835.16" y="2047.5" ></text>
+</g>
+<g >
+<title>operator new (16,303,030,140 samples, 1.93%)</title><rect x="564.8" y="2005" width="22.8" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="567.80" y="2015.5" >o..</text>
+</g>
+<g >
+<title>operator new (424,242,420 samples, 0.05%)</title><rect x="631.6" y="1989" width="0.6" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="634.57" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,070,707,050 samples, 0.25%)</title><rect x="613.4" y="101" width="2.9" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.43" y="111.5" ></text>
+</g>
+<g >
+<title>__memcmp_evex_movbe (4,121,212,080 samples, 0.49%)</title><rect x="650.7" y="2021" width="5.8" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="653.70" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1445" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1455.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;::_M_realloc_insert&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const&amp;&gt; (171,717,170 samples, 0.02%)</title><rect x="1189.8" y="2053" width="0.2" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="1192.76" y="2063.5" ></text>
+</g>
+<g >
+<title>duckdb::SelectionData::SelectionData (212,121,210 samples, 0.03%)</title><rect x="810.6" y="2037" width="0.3" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="813.61" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb_fastpforlib::fastunpack (191,919,190 samples, 0.02%)</title><rect x="831.6" y="2037" width="0.3" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="834.61" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::Executor::ExecuteTask (252,525,250 samples, 0.03%)</title><rect x="923.3" y="2053" width="0.3" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="926.29" y="2063.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (80,808,080 samples, 0.01%)</title><rect x="589.0" y="1989" width="0.1" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="592.02" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::JoinHashTable::Finalize (3,979,797,940 samples, 0.47%)</title><rect x="811.6" y="1989" width="5.6" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="814.62" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::TupleDataAllocator::PinRowBlock (80,808,080 samples, 0.01%)</title><rect x="683.0" y="2021" width="0.1" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="685.97" y="2031.5" ></text>
+</g>
+<g >
+<title>unsigned long duckdb::BinaryExecutor::SelectGeneric&lt;duckdb::string_t, duckdb::string_t, duckdb::Equals&gt; (898,989,890 samples, 0.11%)</title><rect x="1146.2" y="2053" width="1.3" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="1149.21" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (191,919,190 samples, 0.02%)</title><rect x="610.3" y="1925" width="0.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="613.28" y="1935.5" ></text>
+</g>
+<g >
+<title>malloc@plt (363,636,360 samples, 0.04%)</title><rect x="434.1" y="2021" width="0.5" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="437.05" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free (1,090,909,080 samples, 0.13%)</title><rect x="562.2" y="1989" width="1.5" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="565.21" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::Value::~Value (111,111,110 samples, 0.01%)</title><rect x="829.0" y="2037" width="0.1" height="15.0" fill="rgb(213,37,8)" rx="2" ry="2" />
+<text  x="831.96" y="2047.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (222,222,220 samples, 0.03%)</title><rect x="615.4" y="53" width="0.3" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="618.40" y="63.5" ></text>
+</g>
+<g >
+<title>malloc (15,939,393,780 samples, 1.89%)</title><rect x="565.3" y="1989" width="22.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="568.30" y="1999.5" >m..</text>
+</g>
+<g >
+<title>_int_free (1,383,838,370 samples, 0.16%)</title><rect x="303.7" y="2021" width="1.9" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="306.65" y="2031.5" ></text>
+</g>
+<g >
+<title>alloc_perturb (101,010,100 samples, 0.01%)</title><rect x="898.6" y="1989" width="0.1" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="901.60" y="1999.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (202,020,200 samples, 0.02%)</title><rect x="609.9" y="1925" width="0.3" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="612.90" y="1935.5" ></text>
+</g>
+<g >
+<title>[unknown] (151,515,150 samples, 0.02%)</title><rect x="887.4" y="2021" width="0.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="890.39" y="2031.5" ></text>
+</g>
+<g >
+<title>operator new (101,010,100 samples, 0.01%)</title><rect x="752.6" y="2005" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="755.62" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="965" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="975.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1269" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1279.5" ></text>
+</g>
+<g >
+<title>Contest::execute_scan[abi:cxx11] (90,909,090 samples, 0.01%)</title><rect x="610.6" y="1989" width="0.1" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="613.57" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::Executor::HasError (333,333,330 samples, 0.04%)</title><rect x="797.1" y="2037" width="0.4" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="800.08" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (111,111,110 samples, 0.01%)</title><rect x="831.2" y="2021" width="0.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="834.17" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,494,949,470 samples, 0.30%)</title><rect x="613.3" y="1733" width="3.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1743.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="981" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="991.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,232,323,210 samples, 0.26%)</title><rect x="613.4" y="117" width="3.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1301" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1311.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,474,747,430 samples, 0.53%)</title><rect x="800.2" y="2021" width="6.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="803.20" y="2031.5" ></text>
+</g>
+<g >
+<title>operator new (212,121,210 samples, 0.03%)</title><rect x="632.3" y="2005" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="635.31" y="2015.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (1,010,101,000 samples, 0.12%)</title><rect x="213.3" y="1973" width="1.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="216.31" y="1983.5" ></text>
+</g>
+<g >
+<title>_int_free (121,212,120 samples, 0.01%)</title><rect x="616.3" y="69" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="619.33" y="79.5" ></text>
+</g>
+<g >
+<title>void duckdb::PartitionedTupleData::BuildPartitionSel&lt;true&gt; (404,040,400 samples, 0.05%)</title><rect x="900.0" y="2037" width="0.6" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="903.02" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (232,323,230 samples, 0.03%)</title><rect x="613.0" y="1893" width="0.3" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="615.97" y="1903.5" ></text>
+</g>
+<g >
+<title>Contest::execute (656,565,650 samples, 0.08%)</title><rect x="68.0" y="2037" width="0.9" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="71.00" y="2047.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (313,131,310 samples, 0.04%)</title><rect x="615.8" y="53" width="0.4" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="618.78" y="63.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (12,717,171,590 samples, 1.51%)</title><rect x="863.8" y="2037" width="17.8" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="866.79" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_malloc (2,020,202,000 samples, 0.24%)</title><rect x="895.8" y="1989" width="2.8" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="898.77" y="1999.5" ></text>
+</g>
+<g >
+<title>alloc_perturb (676,767,670 samples, 0.08%)</title><rect x="510.7" y="1989" width="1.0" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="513.72" y="1999.5" ></text>
+</g>
+<g >
+<title>re2::DFA::AnalyzeSearchHelper (1,404,040,390 samples, 0.17%)</title><rect x="689.2" y="2021" width="1.9" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="692.15" y="2031.5" ></text>
+</g>
+<g >
+<title>operator new (131,313,130 samples, 0.02%)</title><rect x="514.6" y="2021" width="0.1" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="517.56" y="2031.5" ></text>
+</g>
+<g >
+<title>compare (4,030,302,990 samples, 0.48%)</title><rect x="781.3" y="2037" width="5.7" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="784.34" y="2047.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (181,818,180 samples, 0.02%)</title><rect x="632.6" y="1989" width="0.3" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="635.65" y="1999.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (91,262,625,350 samples, 10.82%)</title><rect x="305.6" y="2021" width="127.6" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="308.59" y="2031.5" >cfree@GLIBC_2.2.5</text>
+</g>
+<g >
+<title>[unknown] (424,242,420 samples, 0.05%)</title><rect x="793.6" y="2021" width="0.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="796.59" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (111,111,110 samples, 0.01%)</title><rect x="551.4" y="1973" width="0.2" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="554.40" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,484,848,460 samples, 0.29%)</title><rect x="613.3" y="1717" width="3.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1727.5" ></text>
+</g>
+<g >
+<title>[unknown] (131,313,130 samples, 0.02%)</title><rect x="793.3" y="2021" width="0.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="796.27" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="869" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="879.5" ></text>
+</g>
+<g >
+<title>operator new (191,919,190 samples, 0.02%)</title><rect x="736.6" y="2005" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="739.59" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="725" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="735.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="213" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="223.5" ></text>
+</g>
+<g >
+<title>_int_malloc (16,101,009,940 samples, 1.91%)</title><rect x="43.4" y="2005" width="22.6" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="46.44" y="2015.5" >_..</text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (90,909,090 samples, 0.01%)</title><rect x="749.6" y="1941" width="0.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="752.63" y="1951.5" ></text>
+</g>
+<g >
+<title>std::thread::_State_impl&lt;std::thread::_Invoker&lt;std::tuple&lt;FilterThreadPool::FilterThreadPool (131,313,130 samples, 0.02%)</title><rect x="1145.7" y="2053" width="0.2" height="15.0" fill="rgb(214,41,10)" rx="2" ry="2" />
+<text  x="1148.74" y="2063.5" ></text>
+</g>
+<g >
+<title>std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;&amp; std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;::emplace_back&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;&amp;&gt; (343,434,340 samples, 0.04%)</title><rect x="888.6" y="2037" width="0.4" height="15.0" fill="rgb(249,204,48)" rx="2" ry="2" />
+<text  x="891.55" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::DatabaseInstance::GetDatabase (90,909,090 samples, 0.01%)</title><rect x="923.0" y="2053" width="0.1" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="925.96" y="2063.5" ></text>
+</g>
+<g >
+<title>_int_free (202,020,200 samples, 0.02%)</title><rect x="610.3" y="1957" width="0.3" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="613.28" y="1967.5" ></text>
+</g>
+<g >
+<title>_int_malloc (121,212,120 samples, 0.01%)</title><rect x="901.8" y="1989" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="904.79" y="1999.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (3,939,393,900 samples, 0.47%)</title><rect x="632.9" y="2005" width="5.5" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="635.90" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorCache::VectorCache (80,808,080 samples, 0.01%)</title><rect x="830.1" y="2037" width="0.1" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="833.07" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_malloc (414,141,410 samples, 0.05%)</title><rect x="631.6" y="1957" width="0.6" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="634.59" y="1967.5" ></text>
+</g>
+<g >
+<title>_int_malloc (131,313,130 samples, 0.02%)</title><rect x="890.8" y="2005" width="0.1" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="893.75" y="2015.5" ></text>
+</g>
+<g >
+<title>_int_free (14,353,535,210 samples, 1.70%)</title><rect x="518.0" y="1989" width="20.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="521.04" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="805" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="815.5" ></text>
+</g>
+<g >
+<title>duckdb::ColumnData::HasUpdates (80,808,080 samples, 0.01%)</title><rect x="794.7" y="2037" width="0.1" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="797.65" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (242,424,240 samples, 0.03%)</title><rect x="609.8" y="1941" width="0.4" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="612.85" y="1951.5" ></text>
+</g>
+<g >
+<title>duckdb::unique_ptr&lt;duckdb::Executor, std::default_delete&lt;duckdb::Executor&gt;, true&gt;::AssertNotNull (101,010,100 samples, 0.01%)</title><rect x="807.9" y="2005" width="0.1" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="810.86" y="2015.5" ></text>
+</g>
+<g >
+<title>_int_free (181,818,180 samples, 0.02%)</title><rect x="632.6" y="1973" width="0.3" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="635.65" y="1983.5" ></text>
+</g>
+<g >
+<title>_int_malloc (202,020,200 samples, 0.02%)</title><rect x="738.7" y="1989" width="0.3" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="741.70" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="773" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="783.5" ></text>
+</g>
+<g >
+<title>malloc (101,010,100 samples, 0.01%)</title><rect x="752.6" y="1989" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="755.62" y="1999.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (121,212,120 samples, 0.01%)</title><rect x="616.3" y="37" width="0.2" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="619.33" y="47.5" ></text>
+</g>
+<g >
+<title>duckdb_je_edata_avail_remove (90,909,090 samples, 0.01%)</title><rect x="838.2" y="2037" width="0.1" height="15.0" fill="rgb(242,173,41)" rx="2" ry="2" />
+<text  x="841.16" y="2047.5" ></text>
+</g>
+<g >
+<title>TableParser&lt;Table::from_csv (616,161,610 samples, 0.07%)</title><rect x="66.5" y="2053" width="0.8" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="69.46" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="533" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="543.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@@GLIBC_2.2.5 (131,313,130 samples, 0.02%)</title><rect x="797.2" y="2021" width="0.2" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="800.21" y="2031.5" ></text>
+</g>
+<g >
+<title>__memset_avx512_unaligned_erms (282,828,280 samples, 0.03%)</title><rect x="759.5" y="2037" width="0.4" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="762.53" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="373" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="383.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@@GLIBC_2.2.5 (141,414,140 samples, 0.02%)</title><rect x="923.4" y="2037" width="0.2" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="926.44" y="2047.5" ></text>
+</g>
+<g >
+<title>Contest::execute_scan[abi:cxx11] (2,404,040,380 samples, 0.28%)</title><rect x="590.9" y="2005" width="3.4" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="593.90" y="2015.5" ></text>
+</g>
+<g >
+<title>alloc_perturb (212,121,210 samples, 0.03%)</title><rect x="587.3" y="1973" width="0.3" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="590.30" y="1983.5" ></text>
+</g>
+<g >
+<title>malloc (242,424,240 samples, 0.03%)</title><rect x="829.7" y="2005" width="0.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="832.69" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,373,737,350 samples, 0.28%)</title><rect x="613.4" y="1541" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1551.5" ></text>
+</g>
+<g >
+<title>operator new (494,949,490 samples, 0.06%)</title><rect x="735.2" y="2005" width="0.7" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="738.16" y="2015.5" ></text>
+</g>
+<g >
+<title>operator new (23,111,110,880 samples, 2.74%)</title><rect x="1111.7" y="2037" width="32.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1114.68" y="2047.5" >op..</text>
+</g>
+<g >
+<title>int duckdb::DeltaDecode&lt;int&gt; (404,040,400 samples, 0.05%)</title><rect x="842.0" y="2037" width="0.6" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="845.00" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="661" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="671.5" ></text>
+</g>
+<g >
+<title>copy (4,434,343,390 samples, 0.53%)</title><rect x="787.0" y="2037" width="6.2" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="789.98" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::TupleDataAllocator::Build (90,909,090 samples, 0.01%)</title><rect x="827.8" y="2037" width="0.1" height="15.0" fill="rgb(234,133,31)" rx="2" ry="2" />
+<text  x="830.79" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (494,949,490 samples, 0.06%)</title><rect x="68.2" y="1973" width="0.7" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="71.20" y="1983.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorStringBuffer::~VectorStringBuffer (111,111,110 samples, 0.01%)</title><rect x="831.2" y="2037" width="0.1" height="15.0" fill="rgb(208,16,3)" rx="2" ry="2" />
+<text  x="834.17" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_malloc (141,414,140 samples, 0.02%)</title><rect x="565.1" y="1989" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="568.11" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free (191,919,190 samples, 0.02%)</title><rect x="607.3" y="1973" width="0.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="610.26" y="1983.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (101,010,100 samples, 0.01%)</title><rect x="829.0" y="2021" width="0.1" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="831.98" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::FindStrInStr (151,515,150 samples, 0.02%)</title><rect x="925.3" y="2053" width="0.2" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="928.32" y="2063.5" ></text>
+</g>
+<g >
+<title>Contest::execute_hash_join[abi:cxx11] (21,141,413,930 samples, 2.51%)</title><rect x="68.9" y="2037" width="29.6" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="71.92" y="2047.5" >Co..</text>
+</g>
+<g >
+<title>std::vector&lt;duckdb::LogicalType, std::allocator&lt;duckdb::LogicalType&gt; &gt;::operator= (141,414,140 samples, 0.02%)</title><rect x="889.1" y="2037" width="0.2" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="892.06" y="2047.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_create (1,040,404,030 samples, 0.12%)</title><rect x="730.4" y="2021" width="1.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="733.37" y="2031.5" ></text>
+</g>
+<g >
+<title>run (555,555,550 samples, 0.07%)</title><rect x="691.1" y="2021" width="0.8" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="694.12" y="2031.5" ></text>
+</g>
+<g >
+<title>malloc@plt (383,838,380 samples, 0.05%)</title><rect x="564.3" y="2005" width="0.5" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="567.26" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="581" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="591.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="341" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="351.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (202,020,200 samples, 0.02%)</title><rect x="610.3" y="1973" width="0.3" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="613.28" y="1983.5" ></text>
+</g>
+<g >
+<title>__memmove_avx512_unaligned_erms (4,080,808,040 samples, 0.48%)</title><rect x="656.5" y="2021" width="5.7" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="659.46" y="2031.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (121,212,120 samples, 0.01%)</title><rect x="886.4" y="2021" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="889.42" y="2031.5" ></text>
+</g>
+<g >
+<title>operator new (55,131,312,580 samples, 6.53%)</title><rect x="434.6" y="2021" width="77.1" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="437.56" y="2031.5" >operator..</text>
+</g>
+<g >
+<title>std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;::reserve (9,090,909,000 samples, 1.08%)</title><rect x="736.9" y="2021" width="12.7" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="739.86" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free (616,161,610 samples, 0.07%)</title><rect x="68.1" y="2005" width="0.8" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="71.06" y="2015.5" ></text>
+</g>
+<g >
+<title>operator new (181,818,180 samples, 0.02%)</title><rect x="761.4" y="2021" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="764.44" y="2031.5" ></text>
+</g>
+<g >
+<title>bool std::__lexicographical_compare_impl&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; const*, std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; const*, __gnu_cxx::__ops::_Iter_less_iter&gt; (5,535,353,480 samples, 0.66%)</title><rect x="667.8" y="2021" width="7.8" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="670.82" y="2031.5" ></text>
+</g>
+<g >
+<title>malloc (242,424,240 samples, 0.03%)</title><rect x="25.7" y="2037" width="0.4" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="28.74" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb_je_tcache_bin_flush_small (111,111,110 samples, 0.01%)</title><rect x="685.5" y="2005" width="0.1" height="15.0" fill="rgb(249,202,48)" rx="2" ry="2" />
+<text  x="688.48" y="2015.5" ></text>
+</g>
+<g >
+<title>pthread_cond_wait@@GLIBC_2.3.2 (80,808,080 samples, 0.01%)</title><rect x="1145.8" y="2037" width="0.1" height="15.0" fill="rgb(253,221,53)" rx="2" ry="2" />
+<text  x="1148.81" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (191,919,190 samples, 0.02%)</title><rect x="888.2" y="2005" width="0.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="891.21" y="2015.5" ></text>
+</g>
+<g >
+<title>malloc (272,727,270 samples, 0.03%)</title><rect x="738.0" y="2005" width="0.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="740.96" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::TupleDataCollection::Initialize (80,808,080 samples, 0.01%)</title><rect x="937.0" y="2053" width="0.2" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="940.05" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc (595,959,590 samples, 0.07%)</title><rect x="433.2" y="2021" width="0.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="436.22" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,353,535,330 samples, 0.28%)</title><rect x="613.4" y="1509" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1519.5" ></text>
+</g>
+<g >
+<title>memcmp@plt (252,525,250 samples, 0.03%)</title><rect x="943.1" y="2053" width="0.4" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="946.14" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (202,020,200 samples, 0.02%)</title><rect x="515.1" y="1957" width="0.2" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="518.06" y="1967.5" ></text>
+</g>
+<g >
+<title>re2::DFA::AnalyzeSearch (808,080,800 samples, 0.10%)</title><rect x="688.0" y="2021" width="1.2" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="691.02" y="2031.5" ></text>
+</g>
+<g >
+<title>re2::RE2::FullMatchN (1,979,797,960 samples, 0.23%)</title><rect x="945.5" y="2053" width="2.8" height="15.0" fill="rgb(212,35,8)" rx="2" ry="2" />
+<text  x="948.52" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc@plt (212,121,210 samples, 0.03%)</title><rect x="1111.4" y="2037" width="0.3" height="15.0" fill="rgb(246,192,46)" rx="2" ry="2" />
+<text  x="1114.39" y="2047.5" ></text>
+</g>
+<g >
+<title>void duckdb::ColumnDataCopy&lt;duckdb::string_t&gt; (121,212,120 samples, 0.01%)</title><rect x="1176.9" y="2053" width="0.2" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="1179.89" y="2063.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (131,313,130 samples, 0.02%)</title><rect x="613.1" y="1861" width="0.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="616.11" y="1871.5" ></text>
+</g>
+<g >
+<title>malloc (131,313,130 samples, 0.02%)</title><rect x="749.6" y="1989" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="752.57" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,303,030,280 samples, 0.27%)</title><rect x="613.4" y="133" width="3.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="143.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorOperations::Hash (181,818,180 samples, 0.02%)</title><rect x="830.9" y="2037" width="0.3" height="15.0" fill="rgb(248,202,48)" rx="2" ry="2" />
+<text  x="833.91" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (505,050,500 samples, 0.06%)</title><rect x="68.2" y="1989" width="0.7" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="71.20" y="1999.5" ></text>
+</g>
+<g >
+<title>operator new (101,010,100 samples, 0.01%)</title><rect x="889.1" y="2021" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="892.12" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (3,353,535,320 samples, 0.40%)</title><rect x="612.9" y="1973" width="4.7" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="615.93" y="1983.5" ></text>
+</g>
+<g >
+<title>compare (2,999,999,970 samples, 0.36%)</title><rect x="675.6" y="2021" width="4.2" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="678.59" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::PhysicalHashJoin::ExecuteInternal (4,414,141,370 samples, 0.52%)</title><rect x="800.3" y="2005" width="6.1" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="803.26" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::JoinHashTable::ScanStructure::AdvancePointers (737,373,730 samples, 0.09%)</title><rect x="929.2" y="2053" width="1.1" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="932.22" y="2063.5" ></text>
+</g>
+<g >
+<title>_int_free (111,111,110 samples, 0.01%)</title><rect x="683.5" y="1989" width="0.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="686.47" y="1999.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;::reserve (6,636,363,570 samples, 0.79%)</title><rect x="889.5" y="2037" width="9.2" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="892.46" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (181,818,180 samples, 0.02%)</title><rect x="632.6" y="1941" width="0.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="635.65" y="1951.5" ></text>
+</g>
+<g >
+<title>duckdb::TaskScheduler::ExecuteForever (3,424,242,390 samples, 0.41%)</title><rect x="822.9" y="2037" width="4.8" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="825.93" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (535,353,530 samples, 0.06%)</title><rect x="691.1" y="1973" width="0.8" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="694.13" y="1983.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (3,101,010,070 samples, 0.37%)</title><rect x="859.3" y="1973" width="4.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="862.29" y="1983.5" ></text>
+</g>
+<g >
+<title>CSVParser::execute (4,141,414,100 samples, 0.49%)</title><rect x="10.4" y="2053" width="5.8" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="13.44" y="2063.5" ></text>
+</g>
+<g >
+<title>_int_free (383,838,380 samples, 0.05%)</title><rect x="514.8" y="1989" width="0.6" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="517.83" y="1999.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (474,747,470 samples, 0.06%)</title><rect x="590.2" y="1925" width="0.6" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="593.18" y="1935.5" ></text>
+</g>
+<g >
+<title>__memcmp_evex_movbe (4,676,767,630 samples, 0.55%)</title><rect x="906.1" y="2053" width="6.5" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="909.10" y="2063.5" ></text>
+</g>
+<g >
+<title>duckdb::JoinHashTable::InsertHashes (3,575,757,540 samples, 0.42%)</title><rect x="812.2" y="1973" width="5.0" height="15.0" fill="rgb(245,185,44)" rx="2" ry="2" />
+<text  x="815.15" y="1983.5" ></text>
+</g>
+<g >
+<title>malloc (191,919,190 samples, 0.02%)</title><rect x="901.7" y="2005" width="0.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="904.69" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1285" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1295.5" ></text>
+</g>
+<g >
+<title>__memset_avx512_unaligned_erms (212,121,210 samples, 0.03%)</title><rect x="811.1" y="2021" width="0.3" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="814.07" y="2031.5" ></text>
+</g>
+<g >
+<title>Table::from_columnar (191,919,190 samples, 0.02%)</title><rect x="612.7" y="1973" width="0.2" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="615.66" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,545,454,520 samples, 0.30%)</title><rect x="613.3" y="1781" width="3.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1791.5" ></text>
+</g>
+<g >
+<title>extent_recycle (90,909,090 samples, 0.01%)</title><rect x="840.6" y="2021" width="0.1" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="843.62" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::RadixPartitionedTupleData::~RadixPartitionedTupleData (111,111,110 samples, 0.01%)</title><rect x="810.3" y="2037" width="0.2" height="15.0" fill="rgb(227,104,24)" rx="2" ry="2" />
+<text  x="813.32" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb_je_eset_remove (131,313,130 samples, 0.02%)</title><rect x="838.6" y="2037" width="0.2" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="841.60" y="2047.5" ></text>
+</g>
+<g >
+<title>void duckdb::AggregateFunction::UnaryUpdate&lt;duckdb::MinMaxState&lt;int&gt;, int, duckdb::MinOperation&gt; (121,212,120 samples, 0.01%)</title><rect x="1176.2" y="2053" width="0.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="1179.21" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,303,030,280 samples, 0.27%)</title><rect x="613.4" y="197" width="3.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="207.5" ></text>
+</g>
+<g >
+<title>malloc (494,949,490 samples, 0.06%)</title><rect x="735.2" y="1989" width="0.7" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="738.16" y="1999.5" ></text>
+</g>
+<g >
+<title>__memcmp_evex_movbe (191,919,190 samples, 0.02%)</title><rect x="753.6" y="2037" width="0.3" height="15.0" fill="rgb(219,67,16)" rx="2" ry="2" />
+<text  x="756.60" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::ArenaAllocator::Allocate (131,313,130 samples, 0.02%)</title><rect x="793.3" y="2005" width="0.2" height="15.0" fill="rgb(205,3,0)" rx="2" ry="2" />
+<text  x="796.27" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1397" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1407.5" ></text>
+</g>
+<g >
+<title>_int_malloc (131,313,130 samples, 0.02%)</title><rect x="749.6" y="1973" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="752.57" y="1983.5" ></text>
+</g>
+<g >
+<title>operator new (8,010,100,930 samples, 0.95%)</title><rect x="738.4" y="2005" width="11.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="741.37" y="2015.5" ></text>
+</g>
+<g >
+<title>Comparison::like_match (484,848,480 samples, 0.06%)</title><rect x="67.3" y="2037" width="0.7" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="70.33" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (545,454,540 samples, 0.06%)</title><rect x="807.2" y="2021" width="0.8" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="810.24" y="2031.5" ></text>
+</g>
+<g >
+<title>alloc_perturb (90,909,090 samples, 0.01%)</title><rect x="649.8" y="1957" width="0.2" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="652.84" y="1967.5" ></text>
+</g>
+<g >
+<title>Table::from_columnar (30,656,565,350 samples, 3.63%)</title><rect x="23.4" y="2053" width="42.9" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="26.39" y="2063.5" >Tabl..</text>
+</g>
+<g >
+<title>duckdb::FastMemcpy (242,424,240 samples, 0.03%)</title><rect x="925.0" y="2053" width="0.3" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="927.98" y="2063.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (292,929,290 samples, 0.03%)</title><rect x="761.3" y="2037" width="0.4" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="764.28" y="2047.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (161,616,160 samples, 0.02%)</title><rect x="68.7" y="1957" width="0.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="71.67" y="1967.5" ></text>
+</g>
+<g >
+<title>TableParser&lt;Table::from_csv (2,191,919,170 samples, 0.26%)</title><rect x="511.7" y="2037" width="3.0" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="514.68" y="2047.5" ></text>
+</g>
+<g >
+<title>void std::__unguarded_linear_insert&lt;__gnu_cxx::__normal_iterator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;*, std::vector&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; &gt; &gt;, __gnu_cxx::__ops::_Val_less_iter&gt; (121,212,120 samples, 0.01%)</title><rect x="1189.3" y="2053" width="0.2" height="15.0" fill="rgb(225,96,22)" rx="2" ry="2" />
+<text  x="1192.31" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc (111,111,110 samples, 0.01%)</title><rect x="889.3" y="2005" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="892.30" y="2015.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (393,939,390 samples, 0.05%)</title><rect x="679.2" y="1941" width="0.5" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="682.19" y="1951.5" ></text>
+</g>
+<g >
+<title>[unknown] (599,747,468,750 samples, 71.08%)</title><rect x="67.3" y="2053" width="838.8" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="70.33" y="2063.5" >[unknown]</text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1461" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1471.5" ></text>
+</g>
+<g >
+<title>std::mutex::lock (111,111,110 samples, 0.01%)</title><rect x="1145.0" y="2053" width="0.2" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="1148.03" y="2063.5" ></text>
+</g>
+<g >
+<title>void duckdb::TupleDataTemplatedScatter&lt;unsigned long&gt; (141,414,140 samples, 0.02%)</title><rect x="750.2" y="2021" width="0.2" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="753.21" y="2031.5" ></text>
+</g>
+<g >
+<title>__memmove_avx512_unaligned_erms (4,313,131,270 samples, 0.51%)</title><rect x="912.6" y="2053" width="6.1" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="915.64" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,727,272,700 samples, 0.32%)</title><rect x="613.3" y="1861" width="3.8" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1871.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; &gt;::_M_realloc_insert&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; (2,929,292,900 samples, 0.35%)</title><rect x="902.0" y="2037" width="4.1" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="904.96" y="2047.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (252,525,250 samples, 0.03%)</title><rect x="1144.0" y="2053" width="0.4" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1147.02" y="2063.5" ></text>
+</g>
+<g >
+<title>operator new (131,313,130 samples, 0.02%)</title><rect x="682.2" y="2005" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="685.20" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::JoinHashTable::PrepareKeys (414,141,410 samples, 0.05%)</title><rect x="928.6" y="2053" width="0.6" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="931.64" y="2063.5" ></text>
+</g>
+<g >
+<title>__memmove_avx512_unaligned_erms (121,212,120 samples, 0.01%)</title><rect x="627.0" y="2005" width="0.2" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="630.00" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::StandardBufferManager::~StandardBufferManager (4,333,333,290 samples, 0.51%)</title><rect x="811.4" y="2037" width="6.1" height="15.0" fill="rgb(225,93,22)" rx="2" ry="2" />
+<text  x="814.42" y="2047.5" ></text>
+</g>
+<g >
+<title>memcpy@plt (171,717,170 samples, 0.02%)</title><rect x="943.5" y="2053" width="0.2" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="946.49" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (34,656,565,310 samples, 4.11%)</title><rect x="158.1" y="1973" width="48.5" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="161.10" y="1983.5" >mall..</text>
+</g>
+<g >
+<title>duckdb::LogicalType::LogicalType (121,212,120 samples, 0.01%)</title><rect x="807.0" y="2037" width="0.1" height="15.0" fill="rgb(221,77,18)" rx="2" ry="2" />
+<text  x="809.96" y="2047.5" ></text>
+</g>
+<g >
+<title>compare (121,212,120 samples, 0.01%)</title><rect x="630.8" y="2005" width="0.2" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="633.80" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb_fastpforlib::internal::__fastunpack1 (90,909,090 samples, 0.01%)</title><rect x="831.9" y="2037" width="0.1" height="15.0" fill="rgb(236,142,34)" rx="2" ry="2" />
+<text  x="834.88" y="2047.5" ></text>
+</g>
+<g >
+<title>operator delete (4,868,686,820 samples, 0.58%)</title><rect x="842.7" y="2037" width="6.8" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="845.71" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (494,949,490 samples, 0.06%)</title><rect x="830.2" y="2021" width="0.7" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="833.21" y="2031.5" ></text>
+</g>
+<g >
+<title>operator delete (656,565,650 samples, 0.08%)</title><rect x="686.1" y="2021" width="0.9" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="689.07" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (212,121,210 samples, 0.03%)</title><rect x="515.1" y="1973" width="0.3" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="518.06" y="1983.5" ></text>
+</g>
+<g >
+<title>void duckdb::TupleDataTemplatedGather&lt;int&gt; (292,929,290 samples, 0.03%)</title><rect x="1188.0" y="2053" width="0.4" height="15.0" fill="rgb(211,32,7)" rx="2" ry="2" />
+<text  x="1191.02" y="2063.5" ></text>
+</g>
+<g >
+<title>duckdb_je_emap_update_edata_state (111,111,110 samples, 0.01%)</title><rect x="838.4" y="2037" width="0.2" height="15.0" fill="rgb(214,42,10)" rx="2" ry="2" />
+<text  x="841.44" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::DuckTransaction::~DuckTransaction (464,646,460 samples, 0.06%)</title><rect x="796.4" y="2037" width="0.6" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="799.39" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::SelectionData::SelectionData (131,313,130 samples, 0.02%)</title><rect x="682.2" y="2021" width="0.2" height="15.0" fill="rgb(252,218,52)" rx="2" ry="2" />
+<text  x="685.20" y="2031.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;::_M_realloc_insert&lt;std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt; const&amp;&gt; (353,535,350 samples, 0.04%)</title><rect x="901.5" y="2037" width="0.5" height="15.0" fill="rgb(219,65,15)" rx="2" ry="2" />
+<text  x="904.46" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (131,313,130 samples, 0.02%)</title><rect x="514.6" y="2005" width="0.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="517.56" y="2015.5" ></text>
+</g>
+<g >
+<title>Contest::execute_scan[abi:cxx11] (84,666,665,820 samples, 10.03%)</title><rect x="98.5" y="2037" width="118.4" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="101.49" y="2047.5" >Contest::execu..</text>
+</g>
+<g >
+<title>malloc (707,070,700 samples, 0.08%)</title><rect x="792.2" y="2005" width="1.0" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="795.19" y="2015.5" ></text>
+</g>
+<g >
+<title>malloc (131,313,130 samples, 0.02%)</title><rect x="626.8" y="1957" width="0.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="629.76" y="1967.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (1,252,525,240 samples, 0.15%)</title><rect x="589.2" y="1989" width="1.7" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="592.15" y="1999.5" ></text>
+</g>
+<g >
+<title>void duckdb::RLEScanPartialInternal&lt;int, true&gt; (282,828,280 samples, 0.03%)</title><rect x="808.2" y="2005" width="0.4" height="15.0" fill="rgb(214,44,10)" rx="2" ry="2" />
+<text  x="811.23" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="421" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="431.5" ></text>
+</g>
+<g >
+<title>Comparison::like_match (343,434,340 samples, 0.04%)</title><rect x="588.5" y="2005" width="0.5" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="591.54" y="2015.5" ></text>
+</g>
+<g >
+<title>unsigned long from_inner_to_column&lt;int&gt; (11,252,525,140 samples, 1.33%)</title><rect x="1148.5" y="2053" width="15.7" height="15.0" fill="rgb(234,133,31)" rx="2" ry="2" />
+<text  x="1151.45" y="2063.5" ></text>
+</g>
+<g >
+<title>duckdb::TaskScheduler::ExecuteForever (282,828,280 samples, 0.03%)</title><rect x="682.5" y="2021" width="0.4" height="15.0" fill="rgb(231,123,29)" rx="2" ry="2" />
+<text  x="685.53" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,373,737,350 samples, 0.28%)</title><rect x="613.4" y="1573" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1583.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (2,030,303,010 samples, 0.24%)</title><rect x="824.7" y="2005" width="2.8" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="827.66" y="2015.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (111,111,110 samples, 0.01%)</title><rect x="610.4" y="1909" width="0.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="613.40" y="1919.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="901" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="911.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="261" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="271.5" ></text>
+</g>
+<g >
+<title>Table::from_columnar (210,707,068,600 samples, 24.97%)</title><rect x="217.0" y="2037" width="294.7" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="219.98" y="2047.5" >Table::from_columnar</text>
+</g>
+<g >
+<title>_int_malloc (2,979,797,950 samples, 0.35%)</title><rect x="745.1" y="1973" width="4.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="748.09" y="1983.5" ></text>
+</g>
+<g >
+<title>duckdb_je_extent_record (80,808,080 samples, 0.01%)</title><rect x="838.9" y="2037" width="0.1" height="15.0" fill="rgb(206,6,1)" rx="2" ry="2" />
+<text  x="841.92" y="2047.5" ></text>
+</g>
+<g >
+<title>Contest::execute_hash_join[abi:cxx11] (232,323,230 samples, 0.03%)</title><rect x="613.0" y="1941" width="0.3" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="615.97" y="1951.5" ></text>
+</g>
+<g >
+<title>operator new (707,070,700 samples, 0.08%)</title><rect x="792.2" y="2021" width="1.0" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="795.19" y="2031.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;duckdb::SelectionData, std::allocator&lt;void&gt;,  (363,636,360 samples, 0.04%)</title><rect x="886.7" y="2037" width="0.5" height="15.0" fill="rgb(209,22,5)" rx="2" ry="2" />
+<text  x="889.73" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,464,646,440 samples, 0.29%)</title><rect x="613.3" y="1669" width="3.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1679.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (232,323,230 samples, 0.03%)</title><rect x="613.0" y="1925" width="0.3" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="615.97" y="1935.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,333,333,310 samples, 0.28%)</title><rect x="613.4" y="1157" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1167.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (646,464,640 samples, 0.08%)</title><rect x="68.0" y="2021" width="0.9" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="71.02" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_malloc (90,909,090 samples, 0.01%)</title><rect x="888.3" y="1989" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="891.34" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,434,343,410 samples, 0.29%)</title><rect x="613.3" y="1621" width="3.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1631.5" ></text>
+</g>
+<g >
+<title>absl::lts_20240722::Mutex::ReaderLock (313,131,310 samples, 0.04%)</title><rect x="760.0" y="2037" width="0.5" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="763.03" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb_je_malloc_default (101,010,100 samples, 0.01%)</title><rect x="942.8" y="2053" width="0.1" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="945.76" y="2063.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (202,020,200 samples, 0.02%)</title><rect x="615.4" y="37" width="0.3" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="618.43" y="47.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@@GLIBC_2.2.5 (111,111,110 samples, 0.01%)</title><rect x="1145.0" y="2037" width="0.2" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="1148.03" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_free (54,686,868,140 samples, 6.48%)</title><rect x="138.3" y="2005" width="76.5" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="141.33" y="2015.5" >_int_free</text>
+</g>
+<g >
+<title>[unknown] (2,999,999,970 samples, 0.36%)</title><rect x="613.3" y="1941" width="4.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1951.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,303,030,280 samples, 0.27%)</title><rect x="613.4" y="181" width="3.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="191.5" ></text>
+</g>
+<g >
+<title>__malloc_trim (232,323,230 samples, 0.03%)</title><rect x="682.6" y="2005" width="0.3" height="15.0" fill="rgb(221,76,18)" rx="2" ry="2" />
+<text  x="685.60" y="2015.5" ></text>
+</g>
+<g >
+<title>operator new (191,919,190 samples, 0.02%)</title><rect x="901.7" y="2021" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="904.69" y="2031.5" ></text>
+</g>
+<g >
+<title>operator new (212,121,210 samples, 0.03%)</title><rect x="810.6" y="2021" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="813.61" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorBuffer::CreateStandardVector (272,727,270 samples, 0.03%)</title><rect x="829.6" y="2037" width="0.4" height="15.0" fill="rgb(235,142,33)" rx="2" ry="2" />
+<text  x="832.64" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::StringVector::AddStringOrBlob (90,909,090 samples, 0.01%)</title><rect x="831.2" y="2005" width="0.1" height="15.0" fill="rgb(217,58,14)" rx="2" ry="2" />
+<text  x="834.17" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb_je_eset_fit (90,909,090 samples, 0.01%)</title><rect x="942.4" y="2053" width="0.1" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="945.37" y="2063.5" ></text>
+</g>
+<g >
+<title>Contest::execute (444,444,440 samples, 0.05%)</title><rect x="514.7" y="2021" width="0.7" height="15.0" fill="rgb(232,126,30)" rx="2" ry="2" />
+<text  x="517.75" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free (818,181,810 samples, 0.10%)</title><rect x="918.9" y="2021" width="1.2" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="921.94" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (42,303,029,880 samples, 5.01%)</title><rect x="354.9" y="1989" width="59.1" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="357.87" y="1999.5" >_int_f..</text>
+</g>
+<g >
+<title>[unknown] (80,808,080 samples, 0.01%)</title><rect x="887.3" y="2021" width="0.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="890.28" y="2031.5" ></text>
+</g>
+<g >
+<title>unsigned long duckdb::TemplatedMatch&lt;true, int, duckdb::Equals&gt; (464,646,460 samples, 0.06%)</title><rect x="1147.6" y="2053" width="0.6" height="15.0" fill="rgb(245,184,44)" rx="2" ry="2" />
+<text  x="1150.59" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (232,323,230 samples, 0.03%)</title><rect x="613.0" y="1877" width="0.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="615.97" y="1887.5" ></text>
+</g>
+<g >
+<title>[unknown] (121,212,120 samples, 0.01%)</title><rect x="811.4" y="1989" width="0.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="814.42" y="1999.5" ></text>
+</g>
+<g >
+<title>malloc (5,575,757,520 samples, 0.66%)</title><rect x="890.9" y="2005" width="7.8" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="893.94" y="2015.5" ></text>
+</g>
+<g >
+<title>operator new (1,393,939,380 samples, 0.17%)</title><rect x="849.5" y="2037" width="2.0" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="852.52" y="2047.5" ></text>
+</g>
+<g >
+<title>Contest::execute_hash_join[abi:cxx11] (16,272,727,110 samples, 1.93%)</title><rect x="515.4" y="2021" width="22.7" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="518.37" y="2031.5" >C..</text>
+</g>
+<g >
+<title>duckdb::TemplatedValidityMask&lt;unsigned long&gt;::SetInvalid (90,909,090 samples, 0.01%)</title><rect x="936.6" y="2053" width="0.1" height="15.0" fill="rgb(208,16,3)" rx="2" ry="2" />
+<text  x="939.60" y="2063.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;* std::__do_uninit_copy&lt;__gnu_cxx::__normal_iterator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; const*, std::vector&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; &gt; &gt;, std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;*&gt; (121,212,120 samples, 0.01%)</title><rect x="889.3" y="2037" width="0.2" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="892.29" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="997" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1007.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1109" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1119.5" ></text>
+</g>
+<g >
+<title>duckdb::ExpressionExecutor::Execute (111,111,110 samples, 0.01%)</title><rect x="923.7" y="2053" width="0.1" height="15.0" fill="rgb(236,143,34)" rx="2" ry="2" />
+<text  x="926.68" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc (54,101,009,560 samples, 6.41%)</title><rect x="436.0" y="2005" width="75.7" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="439.00" y="2015.5" >malloc</text>
+</g>
+<g >
+<title>duckdb::RLEScanState&lt;int&gt;::~RLEScanState (1,505,050,490 samples, 0.18%)</title><rect x="808.2" y="2037" width="2.1" height="15.0" fill="rgb(226,99,23)" rx="2" ry="2" />
+<text  x="811.21" y="2047.5" ></text>
+</g>
+<g >
+<title>void duckdb::RowGroup::TemplatedScan&lt; (202,020,200 samples, 0.02%)</title><rect x="796.8" y="1989" width="0.2" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="799.76" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,333,333,310 samples, 0.28%)</title><rect x="613.4" y="1173" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1183.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1365" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1375.5" ></text>
+</g>
+<g >
+<title>duckdb::ExpressionExecutor::DefaultSelect (343,434,340 samples, 0.04%)</title><rect x="680.5" y="2021" width="0.5" height="15.0" fill="rgb(249,202,48)" rx="2" ry="2" />
+<text  x="683.52" y="2031.5" ></text>
+</g>
+<g >
+<title>malloc (90,909,090 samples, 0.01%)</title><rect x="612.8" y="1941" width="0.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="615.80" y="1951.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (20,818,181,610 samples, 2.47%)</title><rect x="177.5" y="1957" width="29.1" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="180.46" y="1967.5" >un..</text>
+</g>
+<g >
+<title>_int_free (292,929,290 samples, 0.03%)</title><rect x="551.2" y="1989" width="0.4" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="554.15" y="1999.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (90,909,090 samples, 0.01%)</title><rect x="1144.2" y="2037" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="1147.24" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1349" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1359.5" ></text>
+</g>
+<g >
+<title>duckdb::DataChunk::Reset (121,212,120 samples, 0.01%)</title><rect x="922.7" y="2053" width="0.2" height="15.0" fill="rgb(222,79,19)" rx="2" ry="2" />
+<text  x="925.71" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (1,666,666,650 samples, 0.20%)</title><rect x="613.4" y="69" width="2.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.43" y="79.5" ></text>
+</g>
+<g >
+<title>_int_free (1,232,323,220 samples, 0.15%)</title><rect x="589.2" y="1973" width="1.7" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="592.18" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="677" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="687.5" ></text>
+</g>
+<g >
+<title>re2::DFA::AnalyzeSearch (585,858,580 samples, 0.07%)</title><rect x="851.8" y="2037" width="0.8" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="854.78" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::JoinHashTable::ScanStructure::ConstructMarkJoinResult (888,888,880 samples, 0.11%)</title><rect x="930.3" y="2053" width="1.2" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="933.25" y="2063.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (202,020,200 samples, 0.02%)</title><rect x="607.2" y="1989" width="0.3" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="610.25" y="1999.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;char, std::allocator&lt;char&gt; &gt;::_M_default_append (474,747,470 samples, 0.06%)</title><rect x="735.9" y="2021" width="0.6" height="15.0" fill="rgb(243,177,42)" rx="2" ry="2" />
+<text  x="738.86" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1029" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1039.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1093" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1103.5" ></text>
+</g>
+<g >
+<title>duckdb::Allocator::DefaultFree (131,313,130 samples, 0.02%)</title><rect x="793.3" y="2037" width="0.2" height="15.0" fill="rgb(228,107,25)" rx="2" ry="2" />
+<text  x="796.27" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::PendingQueryResult::CheckExecutableInternal (111,111,110 samples, 0.01%)</title><rect x="681.8" y="2021" width="0.1" height="15.0" fill="rgb(224,91,21)" rx="2" ry="2" />
+<text  x="684.77" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::AttachedDatabase::~AttachedDatabase (424,242,420 samples, 0.05%)</title><rect x="793.6" y="2037" width="0.6" height="15.0" fill="rgb(235,140,33)" rx="2" ry="2" />
+<text  x="796.59" y="2047.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;int, std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;int&gt;, std::hash&lt;int&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::find (7,434,343,360 samples, 0.88%)</title><rect x="719.6" y="2021" width="10.4" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="722.57" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,808,080,780 samples, 0.33%)</title><rect x="613.3" y="1877" width="3.9" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1887.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="885" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="895.5" ></text>
+</g>
+<g >
+<title>operator new (151,515,150 samples, 0.02%)</title><rect x="1175.7" y="2037" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1178.70" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (525,252,520 samples, 0.06%)</title><rect x="691.1" y="1957" width="0.8" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="694.13" y="1967.5" ></text>
+</g>
+<g >
+<title>void duckdb::BinaryExecutor::ExecuteGeneric&lt;duckdb::string_t, duckdb::string_t, bool, duckdb::BinaryStandardOperatorWrapper, duckdb::ContainsOperator, bool&gt; (292,929,290 samples, 0.03%)</title><rect x="1176.4" y="2053" width="0.4" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="1179.41" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,525,252,500 samples, 0.30%)</title><rect x="613.3" y="1749" width="3.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1759.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_create (101,010,100 samples, 0.01%)</title><rect x="645.2" y="2005" width="0.2" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="648.25" y="2015.5" ></text>
+</g>
+<g >
+<title>void duckdb::AggregateFunction::UnaryUpdate&lt;duckdb::MinMaxState&lt;int&gt;, int, duckdb::MaxOperation&gt; (161,616,160 samples, 0.02%)</title><rect x="1176.0" y="2053" width="0.2" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="1178.99" y="2063.5" ></text>
+</g>
+<g >
+<title>duckdb_je_free (80,808,080 samples, 0.01%)</title><rect x="839.0" y="2037" width="0.2" height="15.0" fill="rgb(237,147,35)" rx="2" ry="2" />
+<text  x="842.04" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1413" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1423.5" ></text>
+</g>
+<g >
+<title>operator new (474,747,470 samples, 0.06%)</title><rect x="735.9" y="2005" width="0.6" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="738.86" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::DeltaDecodeIndices (454,545,450 samples, 0.05%)</title><rect x="795.7" y="2037" width="0.6" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="798.70" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (131,313,130 samples, 0.02%)</title><rect x="684.4" y="1989" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="687.44" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::ConcurrentQueue::DequeueFromProducer (222,222,220 samples, 0.03%)</title><rect x="795.2" y="2037" width="0.4" height="15.0" fill="rgb(224,87,20)" rx="2" ry="2" />
+<text  x="798.24" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (474,747,470 samples, 0.06%)</title><rect x="735.9" y="1989" width="0.6" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="738.86" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free (313,131,310 samples, 0.04%)</title><rect x="615.8" y="37" width="0.4" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="618.78" y="47.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (333,333,330 samples, 0.04%)</title><rect x="413.6" y="1973" width="0.4" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="416.57" y="1983.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (19,393,939,200 samples, 2.30%)</title><rect x="691.9" y="2021" width="27.1" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="694.89" y="2031.5" >s..</text>
+</g>
+<g >
+<title>std::vector&lt;unsigned char, std::allocator&lt;unsigned char&gt; &gt;::_M_default_append (131,313,130 samples, 0.02%)</title><rect x="749.6" y="2021" width="0.2" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="752.57" y="2031.5" ></text>
+</g>
+<g >
+<title>malloc (1,111,111,100 samples, 0.13%)</title><rect x="215.3" y="2005" width="1.6" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="218.35" y="2015.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (818,181,810 samples, 0.10%)</title><rect x="918.9" y="2037" width="1.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="921.94" y="2047.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_trylock@@GLIBC_2.34 (535,353,530 samples, 0.06%)</title><rect x="839.8" y="2021" width="0.7" height="15.0" fill="rgb(223,86,20)" rx="2" ry="2" />
+<text  x="842.76" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_malloc (101,010,100 samples, 0.01%)</title><rect x="682.2" y="1973" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="685.25" y="1983.5" ></text>
+</g>
+<g >
+<title>re2::Prog::GetDFA (272,727,270 samples, 0.03%)</title><rect x="852.7" y="2037" width="0.4" height="15.0" fill="rgb(245,186,44)" rx="2" ry="2" />
+<text  x="855.70" y="2047.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="597" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="607.5" ></text>
+</g>
+<g >
+<title>run (3,242,424,210 samples, 0.38%)</title><rect x="859.2" y="2037" width="4.6" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="862.22" y="2047.5" ></text>
+</g>
+<g >
+<title>Table::from_columnar (1,383,838,370 samples, 0.16%)</title><rect x="610.7" y="1989" width="1.9" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="613.71" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb_je_eset_insert (121,212,120 samples, 0.01%)</title><rect x="942.5" y="2053" width="0.2" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="945.50" y="2063.5" ></text>
+</g>
+<g >
+<title>duckdb_je_malloc_mutex_lock_slow (878,787,870 samples, 0.10%)</title><rect x="839.3" y="2037" width="1.2" height="15.0" fill="rgb(254,229,54)" rx="2" ry="2" />
+<text  x="842.28" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (707,070,700 samples, 0.08%)</title><rect x="611.7" y="1957" width="0.9" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="614.65" y="1967.5" ></text>
+</g>
+<g >
+<title>malloc (2,242,424,220 samples, 0.27%)</title><rect x="646.8" y="1973" width="3.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="649.83" y="1983.5" ></text>
+</g>
+<g >
+<title>re2::RE2::Match (616,161,610 samples, 0.07%)</title><rect x="947.4" y="2037" width="0.9" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="950.43" y="2047.5" ></text>
+</g>
+<g >
+<title>unsigned long duckdb::TernaryExecutor::Select&lt;int, int, int, duckdb::BothInclusiveBetweenOperator&gt; (151,515,150 samples, 0.02%)</title><rect x="1148.2" y="2053" width="0.3" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="1151.24" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (12,080,807,960 samples, 1.43%)</title><rect x="520.6" y="1957" width="16.9" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="523.62" y="1967.5" ></text>
+</g>
+<g >
+<title>duckdb::HashBytes (1,969,696,950 samples, 0.23%)</title><rect x="925.7" y="2053" width="2.7" height="15.0" fill="rgb(243,177,42)" rx="2" ry="2" />
+<text  x="928.66" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,373,737,350 samples, 0.28%)</title><rect x="613.4" y="1589" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1599.5" ></text>
+</g>
+<g >
+<title>void std::vector&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt;, std::allocator&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; &gt;::_M_realloc_insert&lt;std::vector&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt;, std::allocator&lt;std::variant&lt;int, long, double, std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;, std::monostate&gt; &gt; &gt; &gt; (464,646,460 samples, 0.06%)</title><rect x="650.1" y="2005" width="0.6" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="653.05" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1141" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1151.5" ></text>
+</g>
+<g >
+<title>duckdb::unique_ptr&lt;duckdb::ActiveQueryContext, std::default_delete&lt;duckdb::ActiveQueryContext&gt;, true&gt;::AssertNotNull (111,111,110 samples, 0.01%)</title><rect x="807.7" y="2005" width="0.2" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="810.70" y="2015.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (121,212,120 samples, 0.01%)</title><rect x="616.3" y="85" width="0.2" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="619.33" y="95.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,646,464,620 samples, 0.31%)</title><rect x="613.3" y="1829" width="3.7" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1839.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (3,242,424,210 samples, 0.38%)</title><rect x="859.2" y="2021" width="4.6" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="862.22" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="469" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="479.5" ></text>
+</g>
+<g >
+<title>duckdb_je_extent_dss_mergeable (90,909,090 samples, 0.01%)</title><rect x="838.8" y="2037" width="0.1" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="841.80" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_malloc (959,595,950 samples, 0.11%)</title><rect x="648.5" y="1957" width="1.3" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="651.50" y="1967.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1333" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1343.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (313,131,310 samples, 0.04%)</title><rect x="615.8" y="69" width="0.4" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="618.78" y="79.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (138,101,008,720 samples, 16.37%)</title><rect x="950.9" y="2053" width="193.1" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="953.86" y="2063.5" >std::_Function_handler&lt;vo..</text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="757" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="767.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="549" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="559.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (5,555,555,500 samples, 0.66%)</title><rect x="207.0" y="1989" width="7.7" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="209.95" y="1999.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="821" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="831.5" ></text>
+</g>
+<g >
+<title>duckdb::Value::Value (282,828,280 samples, 0.03%)</title><rect x="684.2" y="2021" width="0.4" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="687.22" y="2031.5" ></text>
+</g>
+<g >
+<title>re2::Prog::SearchDFA (4,242,424,200 samples, 0.50%)</title><rect x="853.1" y="2037" width="5.9" height="15.0" fill="rgb(242,174,41)" rx="2" ry="2" />
+<text  x="856.08" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorCacheBuffer::~VectorCacheBuffer (494,949,490 samples, 0.06%)</title><rect x="830.2" y="2037" width="0.7" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="833.21" y="2047.5" ></text>
+</g>
+<g >
+<title>__memmove_avx512_unaligned_erms (4,101,010,060 samples, 0.49%)</title><rect x="618.1" y="1989" width="5.8" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="621.12" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free (232,323,230 samples, 0.03%)</title><rect x="613.0" y="1909" width="0.3" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="615.97" y="1919.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (15,080,807,930 samples, 1.79%)</title><rect x="517.0" y="2005" width="21.1" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="520.03" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::FSSTPrimitives::DecompressValue (161,616,160 samples, 0.02%)</title><rect x="923.9" y="2053" width="0.3" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="926.94" y="2063.5" ></text>
+</g>
+<g >
+<title>_int_free (343,434,340 samples, 0.04%)</title><rect x="72.0" y="2021" width="0.5" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="75.03" y="2031.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@@GLIBC_2.2.5 (111,111,110 samples, 0.01%)</title><rect x="795.3" y="2021" width="0.2" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="798.32" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::unique_ptr&lt;duckdb::ConcurrentQueue, std::default_delete&lt;duckdb::ConcurrentQueue&gt;, true&gt;::AssertNotNull (101,010,100 samples, 0.01%)</title><rect x="831.4" y="2037" width="0.1" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="834.37" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb_je_pai_alloc_batch_default (141,414,140 samples, 0.02%)</title><rect x="840.6" y="2037" width="0.2" height="15.0" fill="rgb(232,125,29)" rx="2" ry="2" />
+<text  x="843.59" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (181,818,180 samples, 0.02%)</title><rect x="736.6" y="1989" width="0.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="739.60" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorCache::ResetFromCache (90,909,090 samples, 0.01%)</title><rect x="937.9" y="2053" width="0.2" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="940.92" y="2063.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (39,333,332,940 samples, 4.66%)</title><rect x="358.6" y="1973" width="55.0" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="361.56" y="1983.5" >mallo..</text>
+</g>
+<g >
+<title>memcmp@plt (151,515,150 samples, 0.02%)</title><rect x="685.7" y="2021" width="0.2" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="688.72" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,030,303,010 samples, 0.24%)</title><rect x="613.4" y="85" width="2.9" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.43" y="95.5" ></text>
+</g>
+<g >
+<title>duckdb::TupleDataSegment::~TupleDataSegment (90,909,090 samples, 0.01%)</title><rect x="631.4" y="2005" width="0.1" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="634.42" y="2015.5" ></text>
+</g>
+<g >
+<title>operator new (131,313,130 samples, 0.02%)</title><rect x="684.4" y="2005" width="0.2" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="687.44" y="2015.5" ></text>
+</g>
+<g >
+<title>_int_free (16,989,898,820 samples, 2.01%)</title><rect x="74.7" y="2005" width="23.8" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="77.73" y="2015.5" >_..</text>
+</g>
+<g >
+<title>duckdb::JoinHashTable::GetRowPointers (4,323,232,280 samples, 0.51%)</title><rect x="800.4" y="1973" width="6.0" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="803.36" y="1983.5" ></text>
+</g>
+<g >
+<title>malloc (202,020,200 samples, 0.02%)</title><rect x="810.6" y="2005" width="0.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="813.63" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="1045" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1055.5" ></text>
+</g>
+<g >
+<title>[unknown] (1,505,050,490 samples, 0.18%)</title><rect x="808.2" y="2021" width="2.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="811.21" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,343,434,320 samples, 0.28%)</title><rect x="613.4" y="1381" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1391.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="741" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="751.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (111,111,110 samples, 0.01%)</title><rect x="551.4" y="1957" width="0.2" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="554.40" y="1967.5" ></text>
+</g>
+<g >
+<title>malloc (151,515,150 samples, 0.02%)</title><rect x="761.5" y="2005" width="0.2" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="764.48" y="2015.5" ></text>
+</g>
+<g >
+<title>run (843,737,365,300 samples, 100.00%)</title><rect x="10.0" y="2069" width="1180.0" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="13.00" y="2079.5" >run</text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (1,020,202,010 samples, 0.12%)</title><rect x="678.3" y="1973" width="1.5" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="681.33" y="1983.5" ></text>
+</g>
+<g >
+<title>malloc (121,212,120 samples, 0.01%)</title><rect x="890.4" y="2021" width="0.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="893.36" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::FindStrInStr (595,959,590 samples, 0.07%)</title><rect x="798.5" y="2037" width="0.8" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="801.48" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::PendingQueryResult::~PendingQueryResult (545,454,540 samples, 0.06%)</title><rect x="807.2" y="2037" width="0.8" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="810.24" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (242,424,240 samples, 0.03%)</title><rect x="98.2" y="1989" width="0.3" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="101.15" y="1999.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (121,212,120 samples, 0.01%)</title><rect x="749.6" y="1957" width="0.2" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="752.59" y="1967.5" ></text>
+</g>
+<g >
+<title>_int_free (2,090,909,070 samples, 0.25%)</title><rect x="676.9" y="1989" width="2.9" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="679.86" y="1999.5" ></text>
+</g>
+<g >
+<title>duckdb::BufferPool::MemoryUsage::UpdateUsedMemory (101,010,100 samples, 0.01%)</title><rect x="794.5" y="2037" width="0.1" height="15.0" fill="rgb(214,43,10)" rx="2" ry="2" />
+<text  x="797.47" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_malloc (3,313,131,280 samples, 0.39%)</title><rect x="1139.2" y="2005" width="4.7" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="1142.24" y="2015.5" ></text>
+</g>
+<g >
+<title>operator new (707,070,700 samples, 0.08%)</title><rect x="611.7" y="1973" width="0.9" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="614.65" y="1983.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (1,323,232,310 samples, 0.16%)</title><rect x="779.5" y="2037" width="1.8" height="15.0" fill="rgb(233,131,31)" rx="2" ry="2" />
+<text  x="782.49" y="2047.5" ></text>
+</g>
+<g >
+<title>malloc (7,575,757,500 samples, 0.90%)</title><rect x="739.0" y="1989" width="10.6" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="741.98" y="1999.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (181,818,180 samples, 0.02%)</title><rect x="632.6" y="1957" width="0.3" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="635.65" y="1967.5" ></text>
+</g>
+<g >
+<title>duckdb::CompressedStringScanState::FetchStringFromDict (363,636,360 samples, 0.04%)</title><rect x="921.5" y="2053" width="0.5" height="15.0" fill="rgb(241,169,40)" rx="2" ry="2" />
+<text  x="924.54" y="2063.5" ></text>
+</g>
+<g >
+<title>__memmove_avx512_unaligned_erms (90,909,090 samples, 0.01%)</title><rect x="613.5" y="37" width="0.1" height="15.0" fill="rgb(223,84,20)" rx="2" ry="2" />
+<text  x="616.46" y="47.5" ></text>
+</g>
+<g >
+<title>_int_malloc (171,717,170 samples, 0.02%)</title><rect x="810.7" y="1989" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="813.67" y="1999.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (90,909,090 samples, 0.01%)</title><rect x="830.7" y="2005" width="0.1" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="833.70" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::Vector::Slice (131,313,130 samples, 0.02%)</title><rect x="684.7" y="2021" width="0.2" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="687.69" y="2031.5" ></text>
+</g>
+<g >
+<title>operator new (90,909,090 samples, 0.01%)</title><rect x="612.8" y="1957" width="0.1" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="615.80" y="1967.5" ></text>
+</g>
+<g >
+<title>run (191,919,190 samples, 0.02%)</title><rect x="632.6" y="2005" width="0.3" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="635.63" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb_je_tcache_bin_flush_small (80,808,080 samples, 0.01%)</title><rect x="840.8" y="2021" width="0.1" height="15.0" fill="rgb(249,202,48)" rx="2" ry="2" />
+<text  x="843.79" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::VectorOperations::Hash (1,343,434,330 samples, 0.16%)</title><rect x="938.5" y="2053" width="1.9" height="15.0" fill="rgb(248,202,48)" rx="2" ry="2" />
+<text  x="941.55" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (11,939,393,820 samples, 1.42%)</title><rect x="610.3" y="2005" width="16.7" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="613.28" y="2015.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (313,131,310 samples, 0.04%)</title><rect x="214.8" y="2005" width="0.4" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="217.81" y="2015.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (818,181,810 samples, 0.10%)</title><rect x="918.9" y="2053" width="1.2" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="921.94" y="2063.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="837" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="847.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,898,989,870 samples, 0.34%)</title><rect x="613.3" y="1909" width="4.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1919.5" ></text>
+</g>
+<g >
+<title>duckdb::TupleDataAllocator::InitializeChunkState (90,909,090 samples, 0.01%)</title><rect x="936.9" y="2037" width="0.1" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="939.86" y="2047.5" ></text>
+</g>
+<g >
+<title>std::_Hashtable&lt;int, std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;int&gt;, std::hash&lt;int&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::_M_rehash (363,636,360 samples, 0.04%)</title><rect x="719.1" y="2021" width="0.5" height="15.0" fill="rgb(223,85,20)" rx="2" ry="2" />
+<text  x="722.06" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,676,767,650 samples, 0.32%)</title><rect x="613.3" y="1845" width="3.8" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1855.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (121,212,120 samples, 0.01%)</title><rect x="616.3" y="101" width="0.2" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="619.33" y="111.5" ></text>
+</g>
+<g >
+<title>absl::lts_20240722::Mutex::ReaderUnlock (575,757,570 samples, 0.07%)</title><rect x="760.5" y="2037" width="0.8" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="763.46" y="2047.5" ></text>
+</g>
+<g >
+<title>_int_free (797,979,790 samples, 0.09%)</title><rect x="134.7" y="2021" width="1.1" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="137.68" y="2031.5" ></text>
+</g>
+<g >
+<title>operator new (28,464,646,180 samples, 3.37%)</title><rect x="26.5" y="2037" width="39.8" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="29.46" y="2047.5" >ope..</text>
+</g>
+<g >
+<title>std::_Hashtable&lt;int, std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt;, std::allocator&lt;std::pair&lt;int const, std::vector&lt;unsigned long, std::allocator&lt;unsigned long&gt; &gt; &gt; &gt;, std::__detail::_Select1st, std::equal_to&lt;int&gt;, std::hash&lt;int&gt;, std::__detail::_Mod_range_hashing, std::__detail::_Default_ranged_hash, std::__detail::_Prime_rehash_policy, std::__detail::_Hashtable_traits&lt;false, false, true&gt; &gt;::_M_rehash (414,141,410 samples, 0.05%)</title><rect x="614.7" y="37" width="0.6" height="15.0" fill="rgb(223,85,20)" rx="2" ry="2" />
+<text  x="617.75" y="47.5" ></text>
+</g>
+<g >
+<title>duckdb_je_tcache_flush (90,909,090 samples, 0.01%)</title><rect x="840.8" y="2037" width="0.1" height="15.0" fill="rgb(217,56,13)" rx="2" ry="2" />
+<text  x="843.79" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::TupleDataAllocator::ReleaseOrStoreHandlesInternal (151,515,150 samples, 0.02%)</title><rect x="828.0" y="2037" width="0.2" height="15.0" fill="rgb(249,203,48)" rx="2" ry="2" />
+<text  x="830.99" y="2047.5" ></text>
+</g>
+<g >
+<title>free@plt (525,252,520 samples, 0.06%)</title><rect x="841.3" y="2037" width="0.7" height="15.0" fill="rgb(229,112,26)" rx="2" ry="2" />
+<text  x="844.27" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::SelectionVector::Slice (242,424,240 samples, 0.03%)</title><rect x="886.9" y="2005" width="0.3" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="889.88" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="437" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="447.5" ></text>
+</g>
+<g >
+<title>_int_malloc (424,242,420 samples, 0.05%)</title><rect x="216.3" y="1989" width="0.6" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="219.29" y="1999.5" ></text>
+</g>
+<g >
+<title>void duckdb::FSSTStorage::StringScanPartial&lt;true&gt; (3,171,717,140 samples, 0.38%)</title><rect x="1177.1" y="2053" width="4.5" height="15.0" fill="rgb(239,158,37)" rx="2" ry="2" />
+<text  x="1180.13" y="2063.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (696,969,690 samples, 0.08%)</title><rect x="432.2" y="2005" width="1.0" height="15.0" fill="rgb(240,163,39)" rx="2" ry="2" />
+<text  x="435.25" y="2015.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (999,999,990 samples, 0.12%)</title><rect x="678.3" y="1957" width="1.4" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="681.35" y="1967.5" ></text>
+</g>
+<g >
+<title>_int_malloc (151,515,150 samples, 0.02%)</title><rect x="27.0" y="2021" width="0.2" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="29.99" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="405" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="415.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,353,535,330 samples, 0.28%)</title><rect x="613.4" y="1525" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="1535.5" ></text>
+</g>
+<g >
+<title>std::_Function_handler&lt;void  (191,919,190 samples, 0.02%)</title><rect x="617.8" y="1973" width="0.3" height="15.0" fill="rgb(245,187,44)" rx="2" ry="2" />
+<text  x="620.81" y="1983.5" ></text>
+</g>
+<g >
+<title>unlink_chunk.isra.0 (2,010,100,990 samples, 0.24%)</title><rect x="429.2" y="1973" width="2.8" height="15.0" fill="rgb(248,198,47)" rx="2" ry="2" />
+<text  x="432.24" y="1983.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (272,727,270 samples, 0.03%)</title><rect x="730.0" y="2021" width="0.4" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="732.98" y="2031.5" ></text>
+</g>
+<g >
+<title>_int_free (85,535,352,680 samples, 10.14%)</title><rect x="312.6" y="2005" width="119.6" height="15.0" fill="rgb(247,196,46)" rx="2" ry="2" />
+<text  x="315.58" y="2015.5" >_int_free</text>
+</g>
+<g >
+<title>pthread_mutex_lock@@GLIBC_2.2.5 (90,909,090 samples, 0.01%)</title><rect x="631.4" y="1989" width="0.1" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="634.42" y="1999.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (2,575,757,550 samples, 0.31%)</title><rect x="627.2" y="2005" width="3.6" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="630.17" y="2015.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (202,020,200 samples, 0.02%)</title><rect x="610.3" y="1941" width="0.3" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="613.28" y="1951.5" ></text>
+</g>
+<g >
+<title>_int_free_maybe_consolidate (121,212,120 samples, 0.01%)</title><rect x="616.3" y="53" width="0.2" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="619.33" y="63.5" ></text>
+</g>
+<g >
+<title>malloc_consolidate (101,010,100 samples, 0.01%)</title><rect x="563.3" y="1957" width="0.1" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="566.30" y="1967.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (3,999,999,960 samples, 0.47%)</title><rect x="662.2" y="2021" width="5.6" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="665.23" y="2031.5" ></text>
+</g>
+<g >
+<title>[unknown] (4,333,333,290 samples, 0.51%)</title><rect x="811.4" y="2021" width="6.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="814.42" y="2031.5" ></text>
+</g>
+<g >
+<title>duckdb::Value::StringIsValid (101,010,100 samples, 0.01%)</title><rect x="684.1" y="2021" width="0.1" height="15.0" fill="rgb(220,70,16)" rx="2" ry="2" />
+<text  x="687.08" y="2031.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (313,131,310 samples, 0.04%)</title><rect x="886.1" y="2037" width="0.5" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="889.15" y="2047.5" ></text>
+</g>
+<g >
+<title>std::_Hash_bytes (2,303,030,280 samples, 0.27%)</title><rect x="881.6" y="2037" width="3.2" height="15.0" fill="rgb(232,127,30)" rx="2" ry="2" />
+<text  x="884.57" y="2047.5" ></text>
+</g>
+<g >
+<title>alloc_perturb (222,222,220 samples, 0.03%)</title><rect x="66.0" y="2005" width="0.3" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="68.96" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,323,232,300 samples, 0.28%)</title><rect x="613.4" y="645" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.41" y="655.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,535,353,510 samples, 0.30%)</title><rect x="613.3" y="1765" width="3.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1775.5" ></text>
+</g>
+<g >
+<title>_int_malloc (262,626,260 samples, 0.03%)</title><rect x="435.6" y="2005" width="0.4" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="438.64" y="2015.5" ></text>
+</g>
+<g >
+<title>duckdb::FSSTStorage::Select (131,313,130 samples, 0.02%)</title><rect x="924.8" y="2053" width="0.2" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="927.80" y="2063.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_ptr_inplace&lt;duckdb::VectorBuffer, std::allocator&lt;void&gt;,  (151,515,150 samples, 0.02%)</title><rect x="887.4" y="2037" width="0.2" height="15.0" fill="rgb(246,188,45)" rx="2" ry="2" />
+<text  x="890.39" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::ColumnSegment::FilterSelection (171,717,170 samples, 0.02%)</title><rect x="795.0" y="2037" width="0.2" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="797.98" y="2047.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@@GLIBC_2.2.5 (131,313,130 samples, 0.02%)</title><rect x="794.0" y="2005" width="0.1" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="796.96" y="2015.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,434,343,410 samples, 0.29%)</title><rect x="613.3" y="1605" width="3.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.32" y="1615.5" ></text>
+</g>
+<g >
+<title>void duckdb::RegularLikeFunction&lt;duckdb::LikeOperator, false&gt; (101,010,100 samples, 0.01%)</title><rect x="900.8" y="2037" width="0.1" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="903.77" y="2047.5" ></text>
+</g>
+<g >
+<title>duckdb::TupleDataSegment::~TupleDataSegment (181,818,180 samples, 0.02%)</title><rect x="683.4" y="2021" width="0.3" height="15.0" fill="rgb(220,71,17)" rx="2" ry="2" />
+<text  x="686.45" y="2031.5" ></text>
+</g>
+<g >
+<title>auto Contest::JoinAlgorithm::run&lt;int&gt; (343,434,340 samples, 0.04%)</title><rect x="613.6" y="37" width="0.5" height="15.0" fill="rgb(251,215,51)" rx="2" ry="2" />
+<text  x="616.59" y="47.5" ></text>
+</g>
+<g >
+<title>malloc (27,929,292,650 samples, 3.31%)</title><rect x="27.2" y="2021" width="39.1" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="30.21" y="2031.5" >mal..</text>
+</g>
+<g >
+<title>malloc (424,242,420 samples, 0.05%)</title><rect x="631.6" y="1973" width="0.6" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="634.57" y="1983.5" ></text>
+</g>
+<g >
+<title>[unknown] (2,313,131,290 samples, 0.27%)</title><rect x="613.4" y="293" width="3.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="616.42" y="303.5" ></text>
+</g>
+</g>
+</svg>
