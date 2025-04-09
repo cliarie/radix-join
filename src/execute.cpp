@@ -159,6 +159,38 @@ PartitionInfo<KeyType> radix_partition(size_t start, size_t end, const std::vect
     return result;
 }
 
+// Process each partition in parallel 
+template <typename KeyType>
+std::vector<PartitionInfo<KeyType>> parallel_partition(
+    const std::vector<std::vector<Data>>& input_relation,
+    size_t key_col) {
+    
+    size_t num_threads = std::min(NUM_CORES, input_relation.size());
+    if (num_threads == 0) return {};
+    
+    std::vector<std::thread> threads;
+    std::vector<PartitionInfo<KeyType>> thread_partitions(num_threads, PartitionInfo<KeyType>(NUM_PARTITIONS));
+    
+    size_t chunk_size = (input_relation.size() + num_threads - 1) / num_threads;
+    
+    for (size_t i = 0; i < num_threads; i++) {
+        size_t start_idx = i * chunk_size;
+        size_t end_idx = std::min(start_idx + chunk_size, input_relation.size());
+        
+        threads.emplace_back([&, i, start_idx, end_idx]() {
+            pin_thread_to_core(i);
+            thread_partitions[i] = radix_partition<KeyType>(input_relation, key_col, start_idx, end_idx);
+        });
+    }
+    
+    // Wait for all threads to complete
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    return thread_partitions;
+}
+
 struct JoinAlgorithm {
     bool                                             build_left;
     ExecuteResult&                                   left;
