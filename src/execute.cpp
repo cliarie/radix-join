@@ -116,6 +116,15 @@ struct PartitionInfo {
     PartitionInfo(size_t num_partitions) : partitions(num_partitions), histogram(num_partitions, 0) {}
 };
 
+// For thread affinity
+void pin_thread_to_core(int core_id) {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+    
+    pthread_t current_thread = pthread_self();
+    pthread_setaffinity_np(current_thread, sizeof(cpu_set_t), &cpuset);
+}
 
 // Partition Phase: two-pass radix partitioning -> first pass to get histogram, second pass to scatter into partitions
 template<typename KeyType>
