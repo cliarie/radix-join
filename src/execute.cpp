@@ -10,6 +10,104 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 constexpr size_t NUM_PARTITIONS = 128;
 constexpr size_t NUM_CORES = 96;
+constexpr size_t HASH_LOAD_FACTOR = 0.5;
+
+template<typename KeyType>
+class LinearProbeHashTable {
+private:
+    struct Entry {
+        KeyType key;
+        size_t value_idx;
+        bool occupied;
+        
+        Entry() : occupied(false) {}
+    };
+    
+    std::vector<Entry> table;
+    size_t size_;
+    size_t capacity_;
+    
+public:
+    LinearProbeHashTable(size_t estimated_size) {
+        // Size to maintain load factor
+        capacity_ = static_cast<size_t>(estimated_size / HASH_LOAD_FACTOR);
+        // Round up to next power of 2 for fast modulo with mask
+        capacity_ = std::pow(2, std::ceil(std::log2(capacity_)));
+        table.resize(capacity_);
+        size_ = 0;
+    }
+    
+    void insert(KeyType key, size_t value_idx) {
+        size_t idx = hash_function(key) & (capacity_ - 1);
+        
+        while (table[idx].occupied) {
+            // If key already exists, we don't insert duplicate entries for hash join
+            if (table[idx].key == key) {
+                return;
+            }
+            idx = (idx + 1) & (capacity_ - 1); // Linear probe with wrap-around
+        }
+        
+        table[idx].key = key;
+        table[idx].value_idx = value_idx;
+        table[idx].occupied = true;
+        size_++;
+    }
+    
+    std::vector<size_t> find(KeyType key) {
+        std::vector<size_t> matches;
+        size_t idx = hash_function(key) & (capacity_ - 1);
+        
+        // Prefetch next potential entry
+        __builtin_prefetch(&table[(idx + 1) & (capacity_ - 1)]);
+        
+        while (table[idx].occupied) {
+            if (table[idx].key == key) {
+                matches.push_back(table[idx].value_idx);
+            }
+            
+            idx = (idx + 1) & (capacity_ - 1);
+            __builtin_prefetch(&table[(idx + 1) & (capacity_ - 1)]);
+            
+            // If we've wrapped all the way around, stop
+            if (idx == (hash_function(key) & (capacity_ - 1))) {
+                break;
+            }
+        }
+        
+        return matches;
+    }
+    
+    size_t hash_function(KeyType key) {
+        if constexpr (std::is_same_v<KeyType, int32_t> || 
+                     std::is_same_v<KeyType, int64_t>) {
+            // MurmurHash2 integer finalizer
+            uint64_t k = static_cast<uint64_t>(key);
+            k ^= k >> 33;
+            k *= 0xff51afd7ed558ccdULL;
+            k ^= k >> 33;
+            k *= 0xc4ceb9fe1a85ec53ULL;
+            k ^= k >> 33;
+            return static_cast<size_t>(k);
+        } else if constexpr (std::is_same_v<KeyType, double>) {
+            // Convert double to bits and hash as integer
+            union { double d; uint64_t i; } converter;
+            converter.d = key;
+            return hash_function(converter.i);
+        } else if constexpr (std::is_same_v<KeyType, std::string>) {
+            // FNV-1a hash for strings
+            size_t hash = 14695981039346656037ULL; // FNV offset basis
+            for (char c : key) {
+                hash ^= static_cast<size_t>(c);
+                hash *= 1099511628211ULL; // FNV prime
+            }
+            return hash;
+        }
+    }
+    
+    size_t size() const { return size_; }
+    size_t capacity() const { return capacity_; }
+};
 
 template<typename KeyType>
 struct PartitionInfo {
