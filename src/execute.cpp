@@ -127,7 +127,7 @@ PartitionInfo<KeyType> radix_partition(size_t start, size_t end, const std::vect
         std::visit([&](const auto& key) {
             using Tk = std::decay_t<decltype(key)>;
             if constexpr (std::is_same_v<Tk, KeyType>) {
-                size_t partition_idx = // some hash function to get partition index
+                size_t partition_idx = LinearProbeHashTable<KeyType>().hash_function(key) % NUM_PARTITIONS;// some hash function to get partition index
                 result.histogram[partition_idx]++;
             }
         }, record[key_col]);
@@ -142,7 +142,7 @@ PartitionInfo<KeyType> radix_partition(size_t start, size_t end, const std::vect
         std::visit([&](const auto& key) {
             using Tk = std::decay_t<decltype(key)>;
             if constexpr (std::is_same_v<Tk, KeyType>) {
-                size_t partition_idx = // some hash function to get partition index
+                size_t partition_idx = LinearProbeHashTable<KeyType>().hash_function(key) % NUM_PARTITIONS;// some hash function to get partition index
                 result.partitions[partition_idx].emplace_back(key, i);
             }
         }, record[key_col]);
