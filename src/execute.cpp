@@ -1,6 +1,12 @@
 #include <hardware.h>
 #include <plan.h>
 #include <table.h>
+#include <thread>
+#include <pthread.h>
+#include <cmath>
+#include <atomic>
+#include <memory>
+#include <algorithm>
 
 namespace Contest {
 
@@ -10,7 +16,37 @@ ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
 constexpr size_t NUM_PARTITIONS = 128;
 constexpr size_t NUM_CORES = 96;
-constexpr size_t HASH_LOAD_FACTOR = 0.5;
+constexpr float HASH_LOAD_FACTOR = 0.5;
+
+template<typename KeyType>
+struct HashUtil {
+    static size_t hash(KeyType key) {
+        if constexpr (std::is_same_v<KeyType, int32_t> || 
+                     std::is_same_v<KeyType, int64_t>) {
+            // MurmurHash2 integer finalizer
+            uint64_t k = static_cast<uint64_t>(key);
+            k ^= k >> 33;
+            k *= 0xff51afd7ed558ccdULL;
+            k ^= k >> 33;
+            k *= 0xc4ceb9fe1a85ec53ULL;
+            k ^= k >> 33;
+            return static_cast<size_t>(k);
+        } else if constexpr (std::is_same_v<KeyType, double>) {
+            // Convert double to bits and hash as integer
+            union { double d; uint64_t i; } converter;
+            converter.d = key;
+            return hash(converter.i);
+        } else if constexpr (std::is_same_v<KeyType, std::string>) {
+            // FNV-1a hash for strings
+            size_t hash = 14695981039346656037ULL; // FNV offset basis
+            for (char c : key) {
+                hash ^= static_cast<size_t>(c);
+                hash *= 1099511628211ULL; // FNV prime
+            }
+            return hash;
+        }
+    }
+};
 
 template<typename KeyType>
 class LinearProbeHashTable {
@@ -79,30 +115,7 @@ public:
     }
     
     size_t hash_function(KeyType key) {
-        if constexpr (std::is_same_v<KeyType, int32_t> || 
-                     std::is_same_v<KeyType, int64_t>) {
-            // MurmurHash2 integer finalizer
-            uint64_t k = static_cast<uint64_t>(key);
-            k ^= k >> 33;
-            k *= 0xff51afd7ed558ccdULL;
-            k ^= k >> 33;
-            k *= 0xc4ceb9fe1a85ec53ULL;
-            k ^= k >> 33;
-            return static_cast<size_t>(k);
-        } else if constexpr (std::is_same_v<KeyType, double>) {
-            // Convert double to bits and hash as integer
-            union { double d; uint64_t i; } converter;
-            converter.d = key;
-            return hash_function(converter.i);
-        } else if constexpr (std::is_same_v<KeyType, std::string>) {
-            // FNV-1a hash for strings
-            size_t hash = 14695981039346656037ULL; // FNV offset basis
-            for (char c : key) {
-                hash ^= static_cast<size_t>(c);
-                hash *= 1099511628211ULL; // FNV prime
-            }
-            return hash;
-        }
+        return HashUtil<KeyType>::hash(key);
     }
     
     size_t size() const { return size_; }
@@ -111,9 +124,11 @@ public:
 
 template<typename KeyType>
 struct PartitionInfo {
-    std::vector<std::vector<std::pair<KeyType, size_t>>> partitions;
     std::vector<size_t> histogram;
-    PartitionInfo(size_t num_partitions) : partitions(num_partitions), histogram(num_partitions, 0) {}
+    std::vector<size_t> offsets;
+    std::vector<KeyType> keys;
+    std::vector<size_t> idxs;
+    PartitionInfo(size_t num_partitions) : histogram(num_partitions), offsets(num_partitions + 1) {}
 };
 
 // For thread affinity
@@ -127,8 +142,9 @@ void pin_thread_to_core(int core_id) {
 }
 
 // Partition Phase: two-pass radix partitioning -> first pass to get histogram, second pass to scatter into partitions
+// Single threaded radix partition over start to end
 template<typename KeyType>
-PartitionInfo<KeyType> radix_partition(size_t start, size_t end, const std::vector<std::vector<Data>>& input, size_t key_col){
+PartitionInfo<KeyType> radix_partition(const std::vector<std::vector<Data>>& input, size_t key_col, size_t start, size_t end){
     PartitionInfo<KeyType> result(NUM_PARTITIONS);
     // First pass: compute histogram
     for (size_t i = start; i < end; ++i) {
@@ -136,23 +152,32 @@ PartitionInfo<KeyType> radix_partition(size_t start, size_t end, const std::vect
         std::visit([&](const auto& key) {
             using Tk = std::decay_t<decltype(key)>;
             if constexpr (std::is_same_v<Tk, KeyType>) {
-                size_t partition_idx = LinearProbeHashTable<KeyType>().hash_function(key) % NUM_PARTITIONS;// some hash function to get partition index
+                size_t partition_idx = HashUtil<KeyType>::hash(key) % NUM_PARTITIONS;// some hash function to get partition index
                 result.histogram[partition_idx]++;
             }
         }, record[key_col]);
     }
     // Resize partitions based on histogram
-    for (size_t i = 0; i < NUM_PARTITIONS; ++i) {}
-        result.partitions[i].resize(result.histogram[i]);
+    results.offsets[0] = 0;
+    for (size_t i = 0; i < NUM_PARTITIONS; ++i) {
+      result.offsets[i + 1] = result.offsets[i] + result.histogram[i];
     }
+    size_t total = results.offsets[NUM_PARTITIONS];
+    result.keys.resize(total);
+    result.idxs.resize(total);
+    
+    std::vector<size_t> cursor(result.offsets.begin(), result.offsets.end());
+    
     // Second pass: scatter into partitions
-    for (size_t i = start; i < end; ++i) {}
+    for (size_t i = start; i < end; ++i) {
         auto& record = input[i];
         std::visit([&](const auto& key) {
             using Tk = std::decay_t<decltype(key)>;
             if constexpr (std::is_same_v<Tk, KeyType>) {
-                size_t partition_idx = LinearProbeHashTable<KeyType>().hash_function(key) % NUM_PARTITIONS;// some hash function to get partition index
-                result.partitions[partition_idx].emplace_back(key, i);
+                size_t partition_idx = HashUtil<KeyType>::hash(key) % NUM_PARTITIONS;// some hash function to get partition index
+                size_t dst = cursor[partition_idx]++;
+                result.keys[dst] = key;
+                result.idxs[dst] = i;
             }
         }, record[key_col]);
     }
@@ -215,6 +240,109 @@ std::vector<std::vector<std::pair<KeyType, size_t>>> merge_partitions(
     }
     
     return merged;
+}
+
+// Build and probe phase, executed in parallel per partition
+template <typename KeyType>
+void process_partition_join(
+    size_t partition_idx,
+    const std::vector<std::pair<KeyType, size_t>>& build_partition,
+    const std::vector<std::pair<KeyType, size_t>>& probe_partition,
+    const std::vector<std::vector<Data>>& build_relation,
+    const std::vector<std::vector<Data>>& probe_relation,
+    size_t build_offset,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs,
+    std::vector<std::vector<Data>>& results,
+    std::mutex& results_mutex) {
+    
+    // Pin thread to core
+    pin_thread_to_core(partition_idx % NUM_CORES);
+    
+    // Skip empty partitions
+    if (build_partition.empty() || probe_partition.empty()) {
+        return;
+    }
+    
+    // Build phase: create hash table
+    LinearProbeHashTable<KeyType> hash_table(build_partition.size());
+    for (const auto& [key, row_idx] : build_partition) {
+        hash_table.insert(key, row_idx);
+    }
+    
+    // Probe phase: look for matches
+    std::vector<std::vector<Data>> partition_results;
+    partition_results.reserve(probe_partition.size()); // Estimate
+    
+    // Process probe keys in batches of 8 for potential SIMD optimization
+    constexpr size_t BATCH_SIZE = 8;
+    size_t i = 0;
+    
+    // Process full batches
+    for (; i + BATCH_SIZE <= probe_partition.size(); i += BATCH_SIZE) {
+        // Prefetch hash table entries for all keys in batch
+        for (size_t j = 0; j < BATCH_SIZE; j++) {
+            const auto& [key, _] = probe_partition[i + j];
+            size_t idx = hash_table.hash_function(key) & (hash_table.capacity() - 1);
+            __builtin_prefetch(&hash_table, 0, 0);
+        }
+        
+        // Process each key in batch
+        for (size_t j = 0; j < BATCH_SIZE; j++) {
+            const auto& [key, probe_idx] = probe_partition[i + j];
+            auto matches = hash_table.find(key);
+            
+            for (size_t build_idx : matches) {
+                const auto& build_record = build_relation[build_idx];
+                const auto& probe_record = probe_relation[probe_idx];
+                
+                // Construct output record
+                std::vector<Data> new_record;
+                new_record.reserve(output_attrs.size());
+                
+                for (auto [col_idx, _] : output_attrs) {
+                    if (col_idx < build_offset) {
+                        new_record.emplace_back(build_record[col_idx]);
+                    } else {
+                        new_record.emplace_back(probe_record[col_idx - build_offset]);
+                    }
+                }
+                
+                partition_results.emplace_back(std::move(new_record));
+            }
+        }
+    }
+    
+    // Process remaining keys
+    for (; i < probe_partition.size(); i++) {
+        const auto& [key, probe_idx] = probe_partition[i];
+        auto matches = hash_table.find(key);
+        
+        for (size_t build_idx : matches) {
+            const auto& build_record = build_relation[build_idx];
+            const auto& probe_record = probe_relation[probe_idx];
+            
+            std::vector<Data> new_record;
+            new_record.reserve(output_attrs.size());
+            
+            for (auto [col_idx, _] : output_attrs) {
+                if (col_idx < build_offset) {
+                    new_record.emplace_back(build_record[col_idx]);
+                } else {
+                    new_record.emplace_back(probe_record[col_idx - build_offset]);
+                }
+            }
+            
+            partition_results.emplace_back(std::move(new_record));
+        }
+    }
+    
+    // Merge results
+    {
+        std::lock_guard<std::mutex> lock(results_mutex);
+        results.insert(results.end(), 
+                      std::make_move_iterator(partition_results.begin()),
+                      std::make_move_iterator(partition_results.end()));
+    }
 }
 
 struct JoinAlgorithm {
@@ -321,45 +449,176 @@ struct JoinAlgorithm {
     }
 };
 
-ExecuteResult execute_hash_join(const Plan&          plan,
-    const JoinNode&                                  join,
+ExecuteResult execute_hash_join(
+    const Plan& plan,
+    const JoinNode& join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    auto                           left_idx    = join.left;
-    auto                           right_idx   = join.right;
-    auto&                          left_node   = plan.nodes[left_idx];
-    auto&                          right_node  = plan.nodes[right_idx];
-    auto&                          left_types  = left_node.output_attrs;
-    auto&                          right_types = right_node.output_attrs;
-    auto                           left        = execute_impl(plan, left_idx);
-    auto                           right       = execute_impl(plan, right_idx);
+    
+    auto left_idx = join.left;
+    auto right_idx = join.right;
+    auto& left_node = plan.nodes[left_idx];
+    auto& right_node = plan.nodes[right_idx];
+    auto& left_types = left_node.output_attrs;
+    auto& right_types = right_node.output_attrs;
+    
+    auto left = execute_impl(plan, left_idx);
+    auto right = execute_impl(plan, right_idx);
+    
+    // Determine build and probe relations
+    const bool build_left = join.build_left;
+    auto& build_relation = build_left ? left : right;
+    auto& probe_relation = build_left ? right : left;
+    const size_t build_col = build_left ? join.left_attr : join.right_attr;
+    const size_t probe_col = build_left ? join.right_attr : join.left_attr;
+    const size_t build_relation_size = build_left ? left[0].size() : right[0].size();
+    
+    // Result container
     std::vector<std::vector<Data>> results;
-
-    JoinAlgorithm join_algorithm{.build_left = join.build_left,
-        .left                                = left,
-        .right                               = right,
-        .results                             = results,
-        .left_col                            = join.left_attr,
-        .right_col                           = join.right_attr,
-        .output_attrs                        = output_attrs};
-    if (join.build_left) {
-        switch (std::get<1>(left_types[join.left_attr])) {
-        case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-        case DataType::INT64:   join_algorithm.run<int64_t>(); break;
-        case DataType::FP64:    join_algorithm.run<double>(); break;
-        case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+    std::mutex results_mutex;
+    
+    // Execute type-specific join
+    DataType join_type = build_left ? 
+        std::get<1>(left_types[join.left_attr]) : 
+        std::get<1>(right_types[join.right_attr]);
+    
+    switch (join_type) {
+        case DataType::INT32: {
+            // 1. Partition phase
+            auto build_partitions_info = parallel_partition<int32_t>(build_relation, build_col);
+            auto probe_partitions_info = parallel_partition<int32_t>(probe_relation, probe_col);
+            
+            auto build_partitions = merge_partitions(build_partitions_info);
+            auto probe_partitions = merge_partitions(probe_partitions_info);
+            
+            // 2+3. Build and probe phases (per partition)
+            std::vector<std::thread> threads;
+            for (size_t p = 0; p < NUM_PARTITIONS; p++) {
+                threads.emplace_back([&, p]() {
+                    process_partition_join<int32_t>(
+                        p, build_partitions[p], probe_partitions[p],
+                        build_relation, probe_relation, build_relation_size,
+                        output_attrs, results, results_mutex);
+                });
+            }
+            
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            break;
         }
-    } else {
-        switch (std::get<1>(right_types[join.right_attr])) {
-        case DataType::INT32:   join_algorithm.run<int32_t>(); break;
-        case DataType::INT64:   join_algorithm.run<int64_t>(); break;
-        case DataType::FP64:    join_algorithm.run<double>(); break;
-        case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+        case DataType::INT64: {
+            // Same pattern as INT32
+            auto build_partitions_info = parallel_partition<int64_t>(build_relation, build_col);
+            auto probe_partitions_info = parallel_partition<int64_t>(probe_relation, probe_col);
+            
+            auto build_partitions = merge_partitions(build_partitions_info);
+            auto probe_partitions = merge_partitions(probe_partitions_info);
+            
+            std::vector<std::thread> threads;
+            for (size_t p = 0; p < NUM_PARTITIONS; p++) {
+                threads.emplace_back([&, p]() {
+                    process_partition_join<int64_t>(
+                        p, build_partitions[p], probe_partitions[p],
+                        build_relation, probe_relation, build_relation_size,
+                        output_attrs, results, results_mutex);
+                });
+            }
+            
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            break;
+        }
+        case DataType::FP64: {
+            // Same pattern as INT32
+            auto build_partitions_info = parallel_partition<double>(build_relation, build_col);
+            auto probe_partitions_info = parallel_partition<double>(probe_relation, probe_col);
+            
+            auto build_partitions = merge_partitions(build_partitions_info);
+            auto probe_partitions = merge_partitions(probe_partitions_info);
+            
+            std::vector<std::thread> threads;
+            for (size_t p = 0; p < NUM_PARTITIONS; p++) {
+                threads.emplace_back([&, p]() {
+                    process_partition_join<double>(
+                        p, build_partitions[p], probe_partitions[p],
+                        build_relation, probe_relation, build_relation_size,
+                        output_attrs, results, results_mutex);
+                });
+            }
+            
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            break;
+        }
+        case DataType::VARCHAR: {
+            // Same pattern as INT32
+            auto build_partitions_info = parallel_partition<std::string>(build_relation, build_col);
+            auto probe_partitions_info = parallel_partition<std::string>(probe_relation, probe_col);
+            
+            auto build_partitions = merge_partitions(build_partitions_info);
+            auto probe_partitions = merge_partitions(probe_partitions_info);
+            
+            std::vector<std::thread> threads;
+            for (size_t p = 0; p < NUM_PARTITIONS; p++) {
+                threads.emplace_back([&, p]() {
+                    process_partition_join<std::string>(
+                        p, build_partitions[p], probe_partitions[p],
+                        build_relation, probe_relation, build_relation_size,
+                        output_attrs, results, results_mutex);
+                });
+            }
+            
+            for (auto& thread : threads) {
+                thread.join();
+            }
+            break;
         }
     }
-
+    
     return results;
 }
 
+// ExecuteResult execute_hash_join(const Plan&          plan,
+//     const JoinNode&                                  join,
+//     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+//     auto                           left_idx    = join.left;
+//     auto                           right_idx   = join.right;
+//     auto&                          left_node   = plan.nodes[left_idx];
+//     auto&                          right_node  = plan.nodes[right_idx];
+//     auto&                          left_types  = left_node.output_attrs;
+//     auto&                          right_types = right_node.output_attrs;
+//     auto                           left        = execute_impl(plan, left_idx);
+//     auto                           right       = execute_impl(plan, right_idx);
+//     std::vector<std::vector<Data>> results;
+//
+//     JoinAlgorithm join_algorithm{.build_left = join.build_left,
+//         .left                                = left,
+//         .right                               = right,
+//         .results                             = results,
+//         .left_col                            = join.left_attr,
+//         .right_col                           = join.right_attr,
+//         .output_attrs                        = output_attrs};
+//     if (join.build_left) {
+//         switch (std::get<1>(left_types[join.left_attr])) {
+//         case DataType::INT32:   join_algorithm.run<int32_t>(); break;
+//         case DataType::INT64:   join_algorithm.run<int64_t>(); break;
+//         case DataType::FP64:    join_algorithm.run<double>(); break;
+//         case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+//         }
+//     } else {
+//         switch (std::get<1>(right_types[join.right_attr])) {
+//         case DataType::INT32:   join_algorithm.run<int32_t>(); break;
+//         case DataType::INT64:   join_algorithm.run<int64_t>(); break;
+//         case DataType::FP64:    join_algorithm.run<double>(); break;
+//         case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+//         }
+//     }
+//
+//     return results;
+// }
+//
 ExecuteResult execute_scan(const Plan&               plan,
     const ScanNode&                                  scan,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
