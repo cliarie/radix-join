@@ -18,6 +18,11 @@ constexpr size_t NUM_PARTITIONS = 128;
 constexpr size_t NUM_CORES = 96;
 constexpr float HASH_LOAD_FACTOR = 0.5;
 
+static inline size_t next_power_of_two(size_t x) {
+    if (x <= 1) return 1;
+    return 1ull << (64 - __builtin_clzll(x - 1));
+}
+
 template<typename KeyType>
 struct HashUtil {
     static size_t hash(KeyType key) {
@@ -68,7 +73,7 @@ public:
         // Size to maintain load factor
         capacity_ = static_cast<size_t>(estimated_size / HASH_LOAD_FACTOR);
         // Round up to next power of 2 for fast modulo with mask
-        capacity_ = std::pow(2, std::ceil(std::log2(capacity_)));
+        capacity_ = next_power_of_two(capcacity_);
         table.resize(capacity_);
         size_ = 0;
     }
