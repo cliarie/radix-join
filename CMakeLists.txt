@@ -78,6 +78,8 @@ file(GLOB SIGMODPC_SRC
     "src/*.cpp"
 )
 
+find_package(OpenMP REQUIRED)
+
 add_executable(
     run
 
@@ -97,6 +99,14 @@ endif()
 # This flag works on other Power systems, but for now, we disable march=native on all Power machines.
 if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ppc|powerpc|ppc64|ppc64le")
     add_compile_options(-march=native)
+endif()
+
+target_link_libraries(run PRIVATE OpenMP::OpenMP_CXX)
+# add compiler flags specific to Clang the Release configuration
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # Append to the standard Release flags
+    set(CMAKE_CXX_FLAGS_RELEASE
+        "${CMAKE_CXX_FLAGS_RELEASE} -mtune=native -fopenmp -D_GLIBCXX_PARALLEL")
 endif()
 
 add_executable(
