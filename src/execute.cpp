@@ -31,7 +31,15 @@ struct JoinAlgorithm {
             results.add_column(type);
         }
 
+        size_t estimate = std::min(left.row_count(), right.row_count());
+        for (size_t i = 0; i < output_attrs.size(); ++i) {
+            results.get_column(i).values.reserve(estimate);
+        }
+
+
         if (build_left) {
+            hash_table.reserve(left.row_count());
+            bloom_filter.init(left.row_count(), 0.01);
             // Build hash table from left table
             const auto& left_column = left.get_column(left_col).values;
             for (size_t idx = 0; idx < left.row_count(); idx++) {
@@ -48,7 +56,7 @@ struct JoinAlgorithm {
 
             // Probe with right table
             const auto& right_column = right.get_column(right_col).values;
-            std::vector<std::vector<Data>> result_rows;
+            size_t      result_count = 0;
 
             for (size_t right_idx = 0; right_idx < right.row_count(); right_idx++) {
                 std::visit([&](const auto& key) {
@@ -60,17 +68,16 @@ struct JoinAlgorithm {
                         auto it = hash_table.find(key);
                         if (it != hash_table.end()) {
                             for (auto left_idx : it->second) {
-                                std::vector<Data> new_record;
-                                new_record.reserve(output_attrs.size());
-
-                                for (auto [col_idx, _] : output_attrs) {
+                                for (size_t c = 0; c < output_attrs.size(); ++c) {
+                                    auto [col_idx, _] = output_attrs[c];
                                     if (col_idx < left.column_count()) {
-                                        new_record.push_back(left.get_column(col_idx).values[left_idx]);
+                                        results.get_column(c).values.push_back(left.get_column(col_idx).values[left_idx]);
                                     } else {
-                                        new_record.push_back(right.get_column(col_idx - left.column_count()).values[right_idx]);
+                                        size_t ridx = col_idx - left.column_count();
+                                        results.get_column(c).values.push_back(right.get_column(ridx).values[right_idx]);
                                     }
                                 }
-                                result_rows.push_back(std::move(new_record));
+                                ++result_count;
                             }
                         }
                     } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
@@ -78,15 +85,10 @@ struct JoinAlgorithm {
                     }
                 }, right_column[right_idx]);
             }
-
-            // Populate result columns
-            results.set_row_count(result_rows.size());
-            for (size_t row_idx = 0; row_idx < result_rows.size(); row_idx++) {
-                for (size_t col_idx = 0; col_idx < output_attrs.size(); col_idx++) {
-                    results.get_column(col_idx).values.push_back(std::move(result_rows[row_idx][col_idx]));
-                }
-            }
+            results.set_row_count(result_count);
         } else {
+            hash_table.reserve(right.row_count());
+            bloom_filter.init(right.row_count(), 0.01);
             // Build hash table from right table
             const auto& right_column = right.get_column(right_col).values;
             for (size_t idx = 0; idx < right.row_count(); idx++) {
@@ -103,8 +105,7 @@ struct JoinAlgorithm {
 
             // Probe with left table
             const auto& left_column = left.get_column(left_col).values;
-            std::vector<std::vector<Data>> result_rows;
-
+            size_t result_count = 0;
             for (size_t left_idx = 0; left_idx < left.row_count(); left_idx++) {
                 std::visit([&](const auto& key) {
                     using Tk = std::decay_t<decltype(key)>;
@@ -115,17 +116,16 @@ struct JoinAlgorithm {
                         auto it = hash_table.find(key);
                         if (it != hash_table.end()) {
                             for (auto right_idx : it->second) {
-                                std::vector<Data> new_record;
-                                new_record.reserve(output_attrs.size());
-
-                                for (auto [col_idx, _] : output_attrs) {
+                                for (size_t c = 0; c < output_attrs.size(); ++c) {
+                                    auto [col_idx, _] = output_attrs[c];
                                     if (col_idx < left.column_count()) {
-                                        new_record.push_back(left.get_column(col_idx).values[left_idx]);
+                                        results.get_column(c).values.push_back(left.get_column(col_idx).values[left_idx]);
                                     } else {
-                                        new_record.push_back(right.get_column(col_idx - left.column_count()).values[right_idx]);
+                                        size_t ridx = col_idx - left.column_count();
+                                        results.get_column(c).values.push_back(right.get_column(ridx).values[right_idx]);
                                     }
                                 }
-                                result_rows.push_back(std::move(new_record));
+                                ++result_count;
                             }
                         }
                     } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
@@ -133,14 +133,7 @@ struct JoinAlgorithm {
                     }
                 }, left_column[left_idx]);
             }
-
-            // Populate result columns
-            results.set_row_count(result_rows.size());
-            for (size_t row_idx = 0; row_idx < result_rows.size(); row_idx++) {
-                for (size_t col_idx = 0; col_idx < output_attrs.size(); col_idx++) {
-                    results.get_column(col_idx).values.push_back(std::move(result_rows[row_idx][col_idx]));
-                }
-            }
+            results.set_row_count(result_count);
         }
     }
 };
