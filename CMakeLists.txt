@@ -6,6 +6,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+include_directories(${CMAKE_SOURCE_DIR}/include)
+find_package(OpenMP REQUIRED)
+
 Include(FetchContent)
 
 FetchContent_Declare(
@@ -86,7 +89,7 @@ add_executable(
 )
 
 target_include_directories(run PRIVATE include)
-target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
+target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb OpenMP::OpenMP_CXX)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(run PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
@@ -106,7 +109,7 @@ add_executable(
 )
 
 target_include_directories(build_database PRIVATE include)
-target_link_libraries(build_database PRIVATE fmt duckdb)
+target_link_libraries(build_database PRIVATE fmt duckdb )
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(build_database PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
@@ -119,7 +122,7 @@ add_executable(
 )
 
 target_include_directories(unit_tests PRIVATE include)
-target_link_libraries(unit_tests PRIVATE range-v3 fmt Catch2::Catch2WithMain duckdb)
+target_link_libraries(unit_tests PRIVATE range-v3 fmt Catch2::Catch2WithMain duckdb OpenMP::OpenMP_CXX)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(unit_tests PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
