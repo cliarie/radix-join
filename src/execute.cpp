@@ -91,7 +91,36 @@ ExecuteResult hash_join_omp(const Plan &plan,
   while (num_buckets < approx) num_buckets <<= 1;
   size_t bucket_mask = num_buckets - 1;
 
-  // 4) two-pass partitioning
+  // parallel histogram
+  // std::vector<uint32_t> build_hist(num_buckets,0), probe_hist(num_buckets,0);
+  // int nt = omp_get_max_threads();
+  // std::vector<std::vector<uint32_t>> local_bh(nt, std::vector<uint32_t>(num_buckets));
+  // std::vector<std::vector<uint32_t>> local_ph(nt, std::vector<uint32_t>(num_buckets));
+  //
+  // #pragma omp parallel
+  // {
+  //   int tid = omp_get_thread_num();
+  //   #pragma omp for schedule(static)
+  //   for (size_t i = 0; i < B; ++i) if (build_valid[i]) {
+  //     auto h = HashUtil<KeyType>::hash(build_keys[i]) & bucket_mask;
+  //     local_bh[tid][h]++;
+  //   }
+  //   #pragma omp for schedule(static)
+  //   for (size_t i = 0; i < P; ++i) if (probe_valid[i]) {
+  //     auto h = HashUtil<KeyType>::hash(probe_keys[i]) & bucket_mask;
+  //     local_ph[tid][h]++;
+  //   }
+  // }
+  // // now reduce into the global histograms (serial – very cheap: nt·num_buckets ints)
+  // std::fill(build_hist.begin(), build_hist.end(), 0);
+  // std::fill(probe_hist.begin(), probe_hist.end(), 0);
+  // for (int t = 0; t < nt; ++t) {
+  //   for (size_t b = 0; b < num_buckets; ++b) {
+  //     build_hist[b] += local_bh[t][b];
+  //     probe_hist[b] += local_ph[t][b];
+  //   }
+  // }
+
   std::vector<uint32_t> build_hist(num_buckets,0), probe_hist(num_buckets,0);
   for (size_t i = 0; i < B; ++i) if (build_valid[i]) {
     auto h = HashUtil<KeyType>::hash(build_keys[i]) & bucket_mask;
@@ -101,6 +130,42 @@ ExecuteResult hash_join_omp(const Plan &plan,
     auto h = HashUtil<KeyType>::hash(probe_keys[i]) & bucket_mask;
     probe_hist[h]++;
   }
+
+  // parallel scatter
+  // compute per-thread starting offsets
+
+  // std::vector<uint32_t> build_off(num_buckets+1), probe_off(num_buckets+1);
+  // build_off[0] = probe_off[0] = 0;
+  // for (size_t b = 0; b < num_buckets; ++b) {
+  //   build_off[b+1] = build_off[b] + build_hist[b];
+  //   probe_off[b+1] = probe_off[b] + probe_hist[b];
+  // }
+  // std::vector<uint32_t> build_buf(B), probe_buf(P);
+  // std::vector<std::vector<uint32_t>> boff(nt, std::vector<uint32_t>(num_buckets));
+  // std::vector<std::vector<uint32_t>> poff(nt, std::vector<uint32_t>(num_buckets));
+  // for (size_t b = 0, sumB = 0, sumP = 0; b < num_buckets; ++b) {
+  //   uint32_t cB = build_hist[b], cP = probe_hist[b];
+  //   for (int t = 0; t < nt; ++t) {
+  //     boff[t][b] = sumB + (build_hist[b] * t)/nt;
+  //     poff[t][b] = sumP + (probe_hist[b] * t)/nt;
+  //   }
+  //   sumB += cB; sumP += cP;
+  // }
+  // #pragma omp parallel
+  // {
+  //   int tid = omp_get_thread_num();
+  //   uint32_t idx_start = (B*tid)/nt, idx_end = (B*(tid+1))/nt;
+  //   for (uint32_t i = idx_start; i < idx_end; ++i) if (build_valid[i]) {
+  //     auto h = HashUtil<KeyType>::hash(build_keys[i]) & bucket_mask;
+  //     build_buf[ boff[tid][h]++ ] = i;
+  //   }
+  //   idx_start = (P*tid)/nt; idx_end = (P*(tid+1))/nt;
+  //   for (uint32_t i = idx_start; i < idx_end; ++i) if (probe_valid[i]) {
+  //     auto h = HashUtil<KeyType>::hash(probe_keys[i]) & bucket_mask;
+  //     probe_buf[ poff[tid][h]++ ] = i;
+  //   }
+  // }
+
   std::vector<uint32_t> build_off(num_buckets+1), probe_off(num_buckets+1);
   build_off[0] = probe_off[0] = 0;
   for (size_t b = 0; b < num_buckets; ++b) {
