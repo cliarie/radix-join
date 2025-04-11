@@ -1,333 +1,288 @@
+#include <iostream>
 #include <hardware.h>
+#include <memory>
 #include <plan.h>
 #include <table.h>
-#include <vector>
-#include <algorithm>
-#include <ranges>
+#include <bloom_filter.h>
+#include <column_iterator.h>
+#include <simple_columnar_table.h>
 #include <variant>
-#include <omp.h>
+#include <ranges>
 
 namespace Contest {
 
-using ExecuteResult = std::vector<std::vector<Data>>;
+struct WorkContext {
+    std::vector<std::shared_ptr<SimpleColumnarTable>> tables;
+};
 
-ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
+SimpleColumnarTableView execute_impl(const Plan& plan, WorkContext* context, size_t node_idx);
 
-template<typename KeyType>
-struct HashUtil {
-    static size_t hash(KeyType key) {
-        if constexpr (std::is_same_v<KeyType,int32_t> ||
-                      std::is_same_v<KeyType,int64_t>) {
-            uint64_t k = static_cast<uint64_t>(key);
-            k ^= k >> 33;
-            k *= 0xff51afd7ed558ccdULL;
-            k ^= k >> 33;
-            k *= 0xc4ceb9fe1a85ec53ULL;
-            k ^= k >> 33;
-            return static_cast<size_t>(k);
-        } else if constexpr (std::is_same_v<KeyType,double>) {
-            union { double d; uint64_t i; } conv;
-            conv.d = key;
-            return hash(conv.i);
-        } else /* string */ {
-            size_t h = 14695981039346656037ULL;
-            for (char c : key) {
-                h ^= static_cast<size_t>(c);
-                h *= 1099511628211ULL;
+struct JoinAlgorithm {
+    bool                                             build_left;
+    SimpleColumnarTableView&                         left;
+    SimpleColumnarTableView&                         right;
+    SimpleColumnarTable                              results;
+    size_t                                           left_col, right_col;
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs;
+
+    template <class T>
+    auto run() {
+        build_left = left.row_count() <= right.row_count();
+
+        std::unordered_map<T, std::vector<size_t>> hash_table;
+        BloomFilter<T> bloom_filter;
+
+        // Initialize result columns
+        for (auto [_, type] : output_attrs) {
+            results.add_column(type);
+        }
+
+        size_t estimate = std::min(left.row_count(), right.row_count());
+        for (size_t i = 0; i < output_attrs.size(); ++i) {
+            results.get_column(i).values.reserve(estimate);
+        }
+
+        if (build_left) {
+            hash_table.reserve(left.row_count());
+            bloom_filter.init(left.row_count(), 0.01);
+
+            // Build hash table from left table
+            const auto& left_column = left.get_column(left_col).values;
+            for (size_t idx = 0; idx < left.row_count(); idx++) {
+                std::visit([&hash_table, &bloom_filter, idx](const auto& key) {
+                    using Tk = std::decay_t<decltype(key)>;
+                    if constexpr (std::is_same_v<Tk, T>) {
+                        hash_table[key].push_back(idx);
+                        bloom_filter.insert(key);
+                    } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
+                        std::cout << "left hash build k = " << key << std::endl;
+                        throw std::runtime_error("wrong type of field");
+                    }
+                }, left_column[idx]);
             }
-            return h;
+
+            // Probe with right table
+            const auto& right_column = right.get_column(right_col).values;
+            size_t      result_count = 0;
+
+            for (size_t right_idx = 0; right_idx < right.row_count(); right_idx++) {
+                std::visit([&](const auto& key) {
+                    using Tk = std::decay_t<decltype(key)>;
+                    if constexpr (std::is_same_v<Tk, T>) {
+                        if (!bloom_filter.possiblyContains(key)) {
+                            return;
+                        }
+                        auto it = hash_table.find(key);
+                        if (it != hash_table.end()) {
+                            for (auto left_idx : it->second) {
+                                for (size_t c = 0; c < output_attrs.size(); ++c) {
+                                    auto [col_idx, _] = output_attrs[c];
+                                    if (col_idx < left.column_count()) {
+                                        results.get_column(c).values.push_back(left.get_column(col_idx).values[left_idx]);
+                                    } else {
+                                        size_t ridx = col_idx - left.column_count();
+                                        results.get_column(c).values.push_back(right.get_column(ridx).values[right_idx]);
+                                    }
+                                }
+                                ++result_count;
+                            }
+                        }
+                    } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
+                        std::cout << "right probe k = " << key << std::endl;
+                        throw std::runtime_error("wrong type of field");
+                    }
+                }, right_column[right_idx]);
+            }
+            results.set_row_count(result_count);
+        } else {
+            hash_table.reserve(right.row_count());
+            bloom_filter.init(right.row_count(), 0.01);
+
+            // Build hash table from right table
+            const auto& right_column = right.get_column(right_col).values;
+            for (size_t idx = 0; idx < right.row_count(); idx++) {
+                std::visit([&hash_table, &bloom_filter, idx](const auto& key) {
+                    using Tk = std::decay_t<decltype(key)>;
+                    if constexpr (std::is_same_v<Tk, T>) {
+                        hash_table[key].push_back(idx);
+                        bloom_filter.insert(key);
+                    } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
+                        std::cout << "right hash k = " << key << std::endl;
+                        throw std::runtime_error("wrong type of field");
+                    }
+                }, right_column[idx]);
+            }
+
+            // Probe with left table
+            const auto& left_column = left.get_column(left_col).values;
+            size_t result_count = 0;
+            for (size_t left_idx = 0; left_idx < left.row_count(); left_idx++) {
+                std::visit([&](const auto& key) {
+                    using Tk = std::decay_t<decltype(key)>;
+                    if constexpr (std::is_same_v<Tk, T>) {
+                        if (!bloom_filter.possiblyContains(key)) {
+                            return;
+                        }
+                        auto it = hash_table.find(key);
+                        if (it != hash_table.end()) {
+                            for (auto right_idx : it->second) {
+                                for (size_t c = 0; c < output_attrs.size(); ++c) {
+                                    auto [col_idx, _] = output_attrs[c];
+                                    if (col_idx < left.column_count()) {
+                                        results.get_column(c).values.push_back(left.get_column(col_idx).values[left_idx]);
+                                    } else {
+                                        size_t ridx = col_idx - left.column_count();
+                                        results.get_column(c).values.push_back(right.get_column(ridx).values[right_idx]);
+                                    }
+                                }
+                                ++result_count;
+                            }
+                        }
+                    } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
+                        std::cout << "left probe k = " << key << std::endl;
+                        throw std::runtime_error("wrong type of field");
+                    }
+                }, left_column[left_idx]);
+            }
+            results.set_row_count(result_count);
         }
     }
 };
 
-template<typename KeyType>
-ExecuteResult hash_join_omp(const Plan &plan,
-                            const JoinNode &join,
-                            const std::vector<std::tuple<size_t,DataType>> &outs) {
-  // 1) materialize both sides
-  auto left  = execute_impl(plan, join.left);
-  auto right = execute_impl(plan, join.right);
-  if (left.empty() || right.empty()) return {};
-
-  bool build_left  = join.build_left;
-  auto &build_rows = build_left ? left  : right;
-  auto &probe_rows = build_left ? right : left;
-  size_t build_col = build_left ? join.left_attr : join.right_attr;
-  size_t probe_col = build_left ? join.right_attr: join.left_attr;
-  size_t left_w    = left[0].size();
-
-  size_t B = build_rows.size(), P = probe_rows.size();
-
-  // 2) extract join keys & mark non‐null
-  std::vector<KeyType> build_keys(B);
-  std::vector<char>    build_valid(B, 0);
-  for (size_t i = 0; i < B; ++i) {
-    std::visit([&](auto const &v){
-      using T = std::decay_t<decltype(v)>;
-      if constexpr(std::is_same_v<T,KeyType>) {
-        build_keys[i] = v;
-        build_valid[i] = 1;
-      }
-    }, build_rows[i][build_col]);
-  }
-  std::vector<KeyType> probe_keys(P);
-  std::vector<char>    probe_valid(P, 0);
-  for (size_t i = 0; i < P; ++i) {
-    std::visit([&](auto const &v){
-      using T = std::decay_t<decltype(v)>;
-      if constexpr(std::is_same_v<T,KeyType>) {
-        probe_keys[i] = v;
-        probe_valid[i] = 1;
-      }
-    }, probe_rows[i][probe_col]);
-  }
-
-  // 3) pick #buckets so each bucket ≲ L2
-  constexpr size_t BYTES_PER_ENTRY = sizeof(KeyType) + sizeof(uint32_t);
-  size_t approx = (B * BYTES_PER_ENTRY + SPC__LEVEL2_CACHE_SIZE - 1)
-                  / SPC__LEVEL2_CACHE_SIZE;
-  approx = std::clamp<size_t>(approx, 1, 128);
-  size_t num_buckets = 1;
-  while (num_buckets < approx) num_buckets <<= 1;
-  size_t bucket_mask = num_buckets - 1;
-
-  // parallel histogram
-  // std::vector<uint32_t> build_hist(num_buckets,0), probe_hist(num_buckets,0);
-  // int nt = omp_get_max_threads();
-  // std::vector<std::vector<uint32_t>> local_bh(nt, std::vector<uint32_t>(num_buckets));
-  // std::vector<std::vector<uint32_t>> local_ph(nt, std::vector<uint32_t>(num_buckets));
-  //
-  // #pragma omp parallel
-  // {
-  //   int tid = omp_get_thread_num();
-  //   #pragma omp for schedule(static)
-  //   for (size_t i = 0; i < B; ++i) if (build_valid[i]) {
-  //     auto h = HashUtil<KeyType>::hash(build_keys[i]) & bucket_mask;
-  //     local_bh[tid][h]++;
-  //   }
-  //   #pragma omp for schedule(static)
-  //   for (size_t i = 0; i < P; ++i) if (probe_valid[i]) {
-  //     auto h = HashUtil<KeyType>::hash(probe_keys[i]) & bucket_mask;
-  //     local_ph[tid][h]++;
-  //   }
-  // }
-  // // now reduce into the global histograms (serial – very cheap: nt·num_buckets ints)
-  // std::fill(build_hist.begin(), build_hist.end(), 0);
-  // std::fill(probe_hist.begin(), probe_hist.end(), 0);
-  // for (int t = 0; t < nt; ++t) {
-  //   for (size_t b = 0; b < num_buckets; ++b) {
-  //     build_hist[b] += local_bh[t][b];
-  //     probe_hist[b] += local_ph[t][b];
-  //   }
-  // }
-
-  std::vector<uint32_t> build_hist(num_buckets,0), probe_hist(num_buckets,0);
-  for (size_t i = 0; i < B; ++i) if (build_valid[i]) {
-    auto h = HashUtil<KeyType>::hash(build_keys[i]) & bucket_mask;
-    build_hist[h]++;
-  }
-  for (size_t i = 0; i < P; ++i) if (probe_valid[i]) {
-    auto h = HashUtil<KeyType>::hash(probe_keys[i]) & bucket_mask;
-    probe_hist[h]++;
-  }
-
-  // parallel scatter
-  // compute per-thread starting offsets
-
-  // std::vector<uint32_t> build_off(num_buckets+1), probe_off(num_buckets+1);
-  // build_off[0] = probe_off[0] = 0;
-  // for (size_t b = 0; b < num_buckets; ++b) {
-  //   build_off[b+1] = build_off[b] + build_hist[b];
-  //   probe_off[b+1] = probe_off[b] + probe_hist[b];
-  // }
-  // std::vector<uint32_t> build_buf(B), probe_buf(P);
-  // std::vector<std::vector<uint32_t>> boff(nt, std::vector<uint32_t>(num_buckets));
-  // std::vector<std::vector<uint32_t>> poff(nt, std::vector<uint32_t>(num_buckets));
-  // for (size_t b = 0, sumB = 0, sumP = 0; b < num_buckets; ++b) {
-  //   uint32_t cB = build_hist[b], cP = probe_hist[b];
-  //   for (int t = 0; t < nt; ++t) {
-  //     boff[t][b] = sumB + (build_hist[b] * t)/nt;
-  //     poff[t][b] = sumP + (probe_hist[b] * t)/nt;
-  //   }
-  //   sumB += cB; sumP += cP;
-  // }
-  // #pragma omp parallel
-  // {
-  //   int tid = omp_get_thread_num();
-  //   uint32_t idx_start = (B*tid)/nt, idx_end = (B*(tid+1))/nt;
-  //   for (uint32_t i = idx_start; i < idx_end; ++i) if (build_valid[i]) {
-  //     auto h = HashUtil<KeyType>::hash(build_keys[i]) & bucket_mask;
-  //     build_buf[ boff[tid][h]++ ] = i;
-  //   }
-  //   idx_start = (P*tid)/nt; idx_end = (P*(tid+1))/nt;
-  //   for (uint32_t i = idx_start; i < idx_end; ++i) if (probe_valid[i]) {
-  //     auto h = HashUtil<KeyType>::hash(probe_keys[i]) & bucket_mask;
-  //     probe_buf[ poff[tid][h]++ ] = i;
-  //   }
-  // }
-
-  std::vector<uint32_t> build_off(num_buckets+1), probe_off(num_buckets+1);
-  build_off[0] = probe_off[0] = 0;
-  for (size_t b = 0; b < num_buckets; ++b) {
-    build_off[b+1] = build_off[b] + build_hist[b];
-    probe_off[b+1] = probe_off[b] + probe_hist[b];
-  }
-  std::vector<uint32_t> build_buf(B), probe_buf(P);
-  auto bo = build_off, po = probe_off;
-  for (uint32_t i = 0; i < B; ++i) if (build_valid[i]) {
-    auto h = HashUtil<KeyType>::hash(build_keys[i]) & bucket_mask;
-    build_buf[bo[h]++] = i;
-  }
-  for (uint32_t i = 0; i < P; ++i) if (probe_valid[i]) {
-    auto h = HashUtil<KeyType>::hash(probe_keys[i]) & bucket_mask;
-    probe_buf[po[h]++] = i;
-  }
-
-  // 5) per-bucket join in parallel
-  int nthreads = omp_get_max_threads();
-  std::vector<ExecuteResult> thread_out(nthreads);
-
-  #pragma omp parallel
-  {
-    int tid = omp_get_thread_num();
-    auto &local = thread_out[tid];
-
-    #pragma omp for schedule(dynamic,1)
-    for (size_t b = 0; b < num_buckets; ++b) {
-      uint32_t bs = build_off[b], be = build_off[b+1];
-      uint32_t ps = probe_off[b], pe = probe_off[b+1];
-      size_t cnt = be - bs;
-      if (cnt == 0 || ps == pe) continue;
-
-      // micro–hash table with per-slot vectors
-      size_t cap = 1;
-      while (cap < cnt*2) cap <<= 1;
-      std::vector<KeyType> slot_key(cap);
-      std::vector<std::vector<uint32_t>> slot_idxs(cap);
-      std::vector<char> slot_used(cap,0);
-      size_t mask = cap - 1;
-
-      // build phase
-      for (uint32_t idx = bs; idx < be; ++idx) {
-        uint32_t row = build_buf[idx];
-        auto key = build_keys[row];
-        size_t h = HashUtil<KeyType>::hash(key) & mask;
-        while (slot_used[h] && slot_key[h] != key) {
-          h = (h + 1) & mask;
-        }
-        if (!slot_used[h]) {
-          slot_used[h] = 1;
-          slot_key[h]  = key;
-        }
-        slot_idxs[h].push_back(row);
-      }
-
-      // probe phase
-      for (uint32_t idx = ps; idx < pe; ++idx) {
-        uint32_t prow = probe_buf[idx];
-        auto pkey = probe_keys[prow];
-        size_t h = HashUtil<KeyType>::hash(pkey) & mask;
-        while (slot_used[h]) {
-          if (slot_key[h] == pkey) {
-            for (auto bi : slot_idxs[h]) {
-              size_t L = build_left ? bi : prow;
-              size_t R = build_left ? prow : bi;
-              auto &lrow = left[L], &rrow = right[R];
-              std::vector<Data> out;
-              out.reserve(outs.size());
-              for (auto [ci,dt] : outs) {
-                if (ci < left_w)      out.push_back(lrow[ci]);
-                else                  out.push_back(rrow[ci - left_w]);
-              }
-              local.emplace_back(std::move(out));
-            }
-            break;
-          }
-          h = (h + 1) & mask;
-        }
-      }
-    }
-  }
-
-  // 6) merge
-  ExecuteResult result;
-  size_t total = 0;
-  for (auto &v : thread_out) total += v.size();
-  result.reserve(total);
-  for (auto &v : thread_out)
-    for (auto &row : v)
-      result.emplace_back(std::move(row));
-
-  return result;
-}
-// ---------------------------------------------------------
-// The new execute_hash_join using one-pass private partition
-// ---------------------------------------------------------
-ExecuteResult execute_hash_join(
-    const Plan &plan,
-    const JoinNode &join,
-    const std::vector<std::tuple<size_t,DataType>> &outs)
-{
-    DataType t = join.build_left
-    ? std::get<1>(plan.nodes[join.left].output_attrs[join.left_attr])
-    : std::get<1>(plan.nodes[join.right].output_attrs[join.right_attr]);
-
-  switch (t) {
-    case DataType::INT32:   return hash_join_omp<int32_t>(plan,join,outs);
-    case DataType::INT64:   return hash_join_omp<int64_t>(plan,join,outs);
-    case DataType::FP64:    return hash_join_omp<double>(plan,join,outs);
-    case DataType::VARCHAR: return hash_join_omp<std::string>(plan,join,outs);
-    default:                throw std::runtime_error("Unsupported join type");
-  }
-}
-
-ExecuteResult execute_scan(const Plan&               plan,
-    const ScanNode&                                  scan,
+SimpleColumnarTableView execute_hash_join(const Plan&    plan,
+    WorkContext*                                     context,
+    const JoinNode&                                  join,
     const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
-    auto                           table_id = scan.base_table_id;
-    auto&                          input    = plan.inputs[table_id];
-    auto                           table    = Table::from_columnar(input);
-    std::vector<std::vector<Data>> results;
-    for (auto& record: table.table()) {
-        std::vector<Data> new_record;
-        new_record.reserve(output_attrs.size());
-        for (auto [col_idx, _]: output_attrs) {
-            new_record.emplace_back(record[col_idx]);
+    auto                           left_idx    = join.left;
+    auto                           right_idx   = join.right;
+    auto&                          left_node   = plan.nodes[left_idx];
+    auto&                          right_node  = plan.nodes[right_idx];
+    auto&                          left_types  = left_node.output_attrs;
+    auto&                          right_types = right_node.output_attrs;
+    auto                           left        = execute_impl(plan, context, left_idx);
+    auto                           right       = execute_impl(plan, context, right_idx);
+
+    JoinAlgorithm join_algorithm{.build_left = join.build_left,
+        .left                                = left,
+        .right                               = right,
+        .results                             = {},
+        .left_col                            = join.left_attr,
+        .right_col                           = join.right_attr,
+        .output_attrs                        = output_attrs};
+    if (join.build_left) {
+        switch (std::get<1>(left_types[join.left_attr])) {
+        case DataType::INT32:   join_algorithm.run<int32_t>(); break;
+        case DataType::INT64:   join_algorithm.run<int64_t>(); break;
+        case DataType::FP64:    join_algorithm.run<double>(); break;
+        case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
         }
-        results.emplace_back(std::move(new_record));
+    } else {
+        switch (std::get<1>(right_types[join.right_attr])) {
+        case DataType::INT32:   join_algorithm.run<int32_t>(); break;
+        case DataType::INT64:   join_algorithm.run<int64_t>(); break;
+        case DataType::FP64:    join_algorithm.run<double>(); break;
+        case DataType::VARCHAR: join_algorithm.run<std::string>(); break;
+        }
     }
-    return results;
+
+    return std::make_shared<SimpleColumnarTable>(std::move(join_algorithm.results));
 }
 
-ExecuteResult execute_impl(const Plan& plan, size_t node_idx) {
+SimpleColumnarTableView execute_scan(const Plan& plan,
+    WorkContext* context,
+    const ScanNode& scan,
+    const std::vector<std::tuple<size_t, DataType>>& output_attrs) {
+    // auto table_id = scan.base_table_id;
+    // auto& table = plan.inputs[table_id];
+    // SimpleColumnarTable results;
+
+    // // Create columns with the output types
+    // for (auto [_, type] : output_attrs) {
+    //     results.add_column(type);
+    // }
+    // // Set the row count
+    // results.set_row_count(table.num_rows);
+
+    // // Fill the columns with data using iterators
+    // size_t i = 0;
+    // for (auto [col_idx, _] : output_attrs) {
+    //     auto& simple_col = results.get_column(i);
+    //     simple_col.values.reserve(table.num_rows);
+
+    //     for (const auto& value : iterate(table.columns[col_idx])) {
+    //         simple_col.values.push_back(value);
+    //     }
+    //     ++i;
+    // }
+
+    // return SimpleColumnarTableView(std::make_shared<SimpleColumnarTable>(std::move(results)));
+
+    auto table_id = scan.base_table_id;
+    namespace views = ranges::views;
+    auto view_indices = output_attrs
+        | views::transform([](const auto& v) { return std::get<0>(v); })
+        | ranges::to<std::vector<size_t>>();
+    return SimpleColumnarTableView(context->tables[table_id], view_indices);
+}
+
+SimpleColumnarTableView execute_impl(const Plan& plan, WorkContext* context, size_t node_idx) {
     auto& node = plan.nodes[node_idx];
     return std::visit(
         [&](const auto& value) {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, JoinNode>) {
-                return execute_hash_join(plan, value, node.output_attrs);
+                return execute_hash_join(plan, context, value, node.output_attrs);
             } else {
-                return execute_scan(plan, value, node.output_attrs);
+                return execute_scan(plan, context, value, node.output_attrs);
             }
         },
         node.data);
 }
 
-ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
-    namespace views = ranges::views;
-    auto ret        = execute_impl(plan, plan.root);
-    auto ret_types  = plan.nodes[plan.root].output_attrs
-                   | views::transform([](const auto& v) { return std::get<1>(v); })
-                   | ranges::to<std::vector<DataType>>();
-    Table table{std::move(ret), std::move(ret_types)};
-    return table.to_columnar();
+void prepare(const Plan& plan, void* context) {
+    WorkContext* work_context = static_cast<WorkContext*>(context);
+    work_context->tables.clear();
+    for (size_t table_id = 0; table_id < plan.inputs.size(); ++table_id) {
+        const auto& table = plan.inputs[table_id];
+        SimpleColumnarTable results;
+
+        for (const auto& column : table.columns) {
+            results.add_column(column.type);
+        }
+        results.set_row_count(table.num_rows);
+
+        size_t i = 0;
+        for (const auto& column : table.columns) {
+            auto& simple_col = results.get_column(i);
+            simple_col.values.reserve(table.num_rows);
+
+            for (const auto& value : iterate(column)) {
+                simple_col.values.push_back(value);
+            }
+            ++i;
+        }
+        work_context->tables.emplace_back(
+            std::make_shared<SimpleColumnarTable>(std::move(results)));
+    }
+}
+
+ColumnarTable execute(const Plan& plan, void* context) {
+    WorkContext* work_context = static_cast<WorkContext*>(context);
+    if (work_context->tables.empty()) {
+        prepare(plan, context);
+    }
+    auto ret = execute_impl(plan, static_cast<WorkContext*>(context), plan.root);
+    work_context->tables.clear();
+    return ret.to_columnar();
 }
 
 void* build_context() {
-    return nullptr;
+    return static_cast<void*>(new WorkContext());
 }
 
-void destroy_context([[maybe_unused]] void* context) {}
+void destroy_context(void* context) {
+    delete static_cast<WorkContext*>(context);
+}
 
 } // namespace Contest
 
