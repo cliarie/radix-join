@@ -23,6 +23,8 @@ struct JoinAlgorithm {
 
     template <class T>
     auto run() {
+        build_left = left.row_count() <= right.row_count();
+
         std::unordered_map<T, std::vector<size_t>> hash_table;
         BloomFilter<T> bloom_filter;
 
@@ -35,7 +37,6 @@ struct JoinAlgorithm {
         for (size_t i = 0; i < output_attrs.size(); ++i) {
             results.get_column(i).values.reserve(estimate);
         }
-
 
         if (build_left) {
             hash_table.reserve(left.row_count());
