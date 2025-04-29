@@ -8,6 +8,50 @@ using ExecuteResult = std::vector<std::vector<Data>>;
 
 ExecuteResult execute_impl(const Plan& plan, size_t node_idx);
 
+constexpr size_t NUM_PARTITIONS = 128;
+constexpr size_t NUM_CORES = 96;
+
+template<typename KeyType>
+struct PartitionInfo {
+    std::vector<std::vector<std::pair<KeyType, size_t>>> partitions;
+    std::vector<size_t> histogram;
+    PartitionInfo(size_t num_partitions) : partitions(num_partitions), histogram(num_partitions, 0) {}
+};
+
+
+// Partition Phase: two-pass radix partitioning -> first pass to get histogram, second pass to scatter into partitions
+template<typename KeyType>
+PartitionInfo<KeyType> radix_partition(size_t start, size_t end, const std::vector<std::vector<Data>>& input, size_t key_col){
+    PartitionInfo<KeyType> result(NUM_PARTITIONS);
+    // First pass: compute histogram
+    for (size_t i = start; i < end; ++i) {
+        auto& record = input[i];
+        std::visit([&](const auto& key) {
+            using Tk = std::decay_t<decltype(key)>;
+            if constexpr (std::is_same_v<Tk, KeyType>) {
+                size_t partition_idx = // some hash function to get partition index
+                result.histogram[partition_idx]++;
+            }
+        }, record[key_col]);
+    }
+    // Resize partitions based on histogram
+    for (size_t i = 0; i < NUM_PARTITIONS; ++i) {}
+        result.partitions[i].resize(result.histogram[i]);
+    }
+    // Second pass: scatter into partitions
+    for (size_t i = start; i < end; ++i) {}
+        auto& record = input[i];
+        std::visit([&](const auto& key) {
+            using Tk = std::decay_t<decltype(key)>;
+            if constexpr (std::is_same_v<Tk, KeyType>) {
+                size_t partition_idx = // some hash function to get partition index
+                result.partitions[partition_idx].emplace_back(key, i);
+            }
+        }, record[key_col]);
+    }
+    return result;
+}
+
 struct JoinAlgorithm {
     bool                                             build_left;
     ExecuteResult&                                   left;
