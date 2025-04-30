@@ -191,6 +191,32 @@ std::vector<PartitionInfo<KeyType>> parallel_partition(
     return thread_partitions;
 }
 
+// Merge partitions from all threads
+template <typename KeyType>
+std::vector<std::vector<std::pair<KeyType, size_t>>> merge_partitions(
+    const std::vector<PartitionInfo<KeyType>>& thread_partitions) {
+    
+    std::vector<std::vector<std::pair<KeyType, size_t>>> merged(NUM_PARTITIONS);
+    
+    // Calculate total size for each merged partition
+    for (size_t p = 0; p < NUM_PARTITIONS; p++) {
+        size_t total_size = 0;
+        for (const auto& tp : thread_partitions) {
+            total_size += tp.partitions[p].size();
+        }
+        merged[p].reserve(total_size);
+    }
+    
+    // Merge partitions
+    for (size_t p = 0; p < NUM_PARTITIONS; p++) {
+        for (const auto& tp : thread_partitions) {
+            merged[p].insert(merged[p].end(), tp.partitions[p].begin(), tp.partitions[p].end());
+        }
+    }
+    
+    return merged;
+}
+
 struct JoinAlgorithm {
     bool                                             build_left;
     ExecuteResult&                                   left;
