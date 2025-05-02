@@ -267,7 +267,12 @@ void prepare(const Plan& plan, void* context) {
 }
 
 ColumnarTable execute(const Plan& plan, void* context) {
+    WorkContext* work_context = static_cast<WorkContext*>(context);
+    if (work_context->tables.empty()) {
+        prepare(plan, context);
+    }
     auto ret = execute_impl(plan, static_cast<WorkContext*>(context), plan.root);
+    work_context->tables.clear();
     return ret.to_columnar();
 }
 
