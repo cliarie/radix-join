@@ -54,4 +54,3 @@
 #define SPC__LEVEL4_CACHE_SIZE                  0
 #define SPC__LEVEL4_CACHE_ASSOC                 0
 #define SPC__LEVEL4_CACHE_LINESIZE              0
-

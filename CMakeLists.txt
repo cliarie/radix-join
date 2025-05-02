@@ -85,8 +85,12 @@ add_executable(
     tests/read_sql.cpp
 )
 
-target_include_directories(run PRIVATE include)
-target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb)
+if(NOT DEFINED ENV{GPERFTOOLS_PATH})
+  message(FATAL_ERROR "The environment variable GPERFTOOLS_PATH must be set before configuring this project.")
+endif()
+
+target_include_directories(run PRIVATE include $ENV{GPERFTOOLS_PATH}/src)
+target_link_libraries(run PRIVATE re2 fmt range-v3 nlohmann_json::nlohmann_json sqlparser duckdb $ENV{GPERFTOOLS_PATH}/.libs/libprofiler.so)
 if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     target_compile_definitions(run PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
