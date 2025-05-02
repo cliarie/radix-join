@@ -2,6 +2,7 @@
 #include <hardware.h>
 #include <plan.h>
 #include <table.h>
+#include <bloom_filter.h>
 #include <column_iterator.h>
 #include <simple_columnar_table.h>
 #include <variant>
@@ -23,40 +24,45 @@ struct JoinAlgorithm {
     template <class T>
     auto run() {
         std::unordered_map<T, std::vector<size_t>> hash_table;
-        
+        BloomFilter<T> bloom_filter;
+
         // Initialize result columns
         for (auto [_, type] : output_attrs) {
             results.add_column(type);
         }
-        
+
         if (build_left) {
             // Build hash table from left table
             const auto& left_column = left.get_column(left_col).values;
             for (size_t idx = 0; idx < left.row_count(); idx++) {
-                std::visit([&hash_table, idx](const auto& key) {
+                std::visit([&hash_table, &bloom_filter, idx](const auto& key) {
                     using Tk = std::decay_t<decltype(key)>;
                     if constexpr (std::is_same_v<Tk, T>) {
                         hash_table[key].push_back(idx);
+                        bloom_filter.insert(key);
                     } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
                         throw std::runtime_error("wrong type of field");
                     }
                 }, left_column[idx]);
             }
-            
+
             // Probe with right table
             const auto& right_column = right.get_column(right_col).values;
             std::vector<std::vector<Data>> result_rows;
-            
+
             for (size_t right_idx = 0; right_idx < right.row_count(); right_idx++) {
                 std::visit([&](const auto& key) {
                     using Tk = std::decay_t<decltype(key)>;
                     if constexpr (std::is_same_v<Tk, T>) {
+                        if (!bloom_filter.possiblyContains(key)) {
+                            return;
+                        }
                         auto it = hash_table.find(key);
                         if (it != hash_table.end()) {
                             for (auto left_idx : it->second) {
                                 std::vector<Data> new_record;
                                 new_record.reserve(output_attrs.size());
-                                
+
                                 for (auto [col_idx, _] : output_attrs) {
                                     if (col_idx < left.column_count()) {
                                         new_record.push_back(left.get_column(col_idx).values[left_idx]);
@@ -72,7 +78,7 @@ struct JoinAlgorithm {
                     }
                 }, right_column[right_idx]);
             }
-            
+
             // Populate result columns
             results.set_row_count(result_rows.size());
             for (size_t row_idx = 0; row_idx < result_rows.size(); row_idx++) {
@@ -84,30 +90,34 @@ struct JoinAlgorithm {
             // Build hash table from right table
             const auto& right_column = right.get_column(right_col).values;
             for (size_t idx = 0; idx < right.row_count(); idx++) {
-                std::visit([&hash_table, idx](const auto& key) {
+                std::visit([&hash_table, &bloom_filter, idx](const auto& key) {
                     using Tk = std::decay_t<decltype(key)>;
                     if constexpr (std::is_same_v<Tk, T>) {
                         hash_table[key].push_back(idx);
+                        bloom_filter.insert(key);
                     } else if constexpr (not std::is_same_v<Tk, std::monostate>) {
                         throw std::runtime_error("wrong type of field");
                     }
                 }, right_column[idx]);
             }
-            
+
             // Probe with left table
             const auto& left_column = left.get_column(left_col).values;
             std::vector<std::vector<Data>> result_rows;
-            
+
             for (size_t left_idx = 0; left_idx < left.row_count(); left_idx++) {
                 std::visit([&](const auto& key) {
                     using Tk = std::decay_t<decltype(key)>;
                     if constexpr (std::is_same_v<Tk, T>) {
+                        if (!bloom_filter.possiblyContains(key)) {
+                            return;
+                        }
                         auto it = hash_table.find(key);
                         if (it != hash_table.end()) {
                             for (auto right_idx : it->second) {
                                 std::vector<Data> new_record;
                                 new_record.reserve(output_attrs.size());
-                                
+
                                 for (auto [col_idx, _] : output_attrs) {
                                     if (col_idx < left.column_count()) {
                                         new_record.push_back(left.get_column(col_idx).values[left_idx]);
@@ -123,7 +133,7 @@ struct JoinAlgorithm {
                     }
                 }, left_column[left_idx]);
             }
-            
+
             // Populate result columns
             results.set_row_count(result_rows.size());
             for (size_t row_idx = 0; row_idx < result_rows.size(); row_idx++) {
@@ -180,26 +190,26 @@ SimpleColumnarTable execute_scan(const Plan& plan,
     auto table_id = scan.base_table_id;
     auto& table = plan.inputs[table_id];
     SimpleColumnarTable results;
-    
+
     // Create columns with the output types
     for (auto [_, type] : output_attrs) {
         results.add_column(type);
     }
     // Set the row count
     results.set_row_count(table.num_rows);
-    
+
     // Fill the columns with data using iterators
     size_t i = 0;
     for (auto [col_idx, _] : output_attrs) {
         auto& simple_col = results.get_column(i);
         simple_col.values.reserve(table.num_rows);
-        
+
         for (const auto& value : iterate(table.columns[col_idx])) {
             simple_col.values.push_back(value);
         }
         ++i;
     }
-    
+
     return results;
 }
 
@@ -223,7 +233,7 @@ ColumnarTable execute(const Plan& plan, [[maybe_unused]] void* context) {
     auto ret_types  = plan.nodes[plan.root].output_attrs
                    | views::transform([](const auto& v) { return std::get<1>(v); })
                    | ranges::to<std::vector<DataType>>();
-    
+
     return ret.to_columnar();
 }
 
