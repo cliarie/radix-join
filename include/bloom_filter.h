@@ -1,4 +1,9 @@
-template<class Key>
+#pragma once
+#include <vector>
+#include <cstdint>
+#include <cmath>
+
+template <class Key>
 class BloomFilter {
     std::vector<std::uint64_t> bits_;
     std::size_t                num_bits_   = 0;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <vector>
 #include <common.h>
 #include <attribute.h>
@@ -63,14 +64,6 @@ public:
 
     void set_row_count(size_t count) {
         num_rows = count;
-    }
-
-    std::vector<SimpleColumn>& get_columns() {
-        return columns;
-    }
-
-    const std::vector<SimpleColumn>& get_columns() const {
-        return columns;
     }
 
     ColumnarTable to_columnar() const {
@@ -299,6 +292,42 @@ public:
         }
 
         return ret;
+    }
+};
+
+class SimpleColumnarTableView {
+private:
+    std::shared_ptr<SimpleColumnarTable> base_table;
+    std::vector<size_t> column_indices;
+
+public:
+    SimpleColumnarTableView(std::shared_ptr<SimpleColumnarTable> table, const std::vector<size_t>& indices)
+        : base_table(table), column_indices(indices) {}
+
+    SimpleColumnarTableView(std::shared_ptr<SimpleColumnarTable> table)
+        : base_table(table) {
+        for (size_t i = 0; i < table->column_count(); ++i) {
+            column_indices.push_back(i);
+        }
+    }
+
+    size_t column_count() const {
+        return column_indices.size();
+    }
+
+    size_t row_count() const {
+        return base_table->row_count();
+    }
+
+    const SimpleColumn& get_column(size_t view_idx) const {
+        if (view_idx >= column_indices.size()) {
+            throw std::out_of_range("Column index out of range");
+        }
+        return base_table->get_column(column_indices[view_idx]);
+    }
+
+    ColumnarTable to_columnar() const {
+        return base_table->to_columnar();
     }
 };
 
