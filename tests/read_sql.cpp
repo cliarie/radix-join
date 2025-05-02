@@ -1231,21 +1231,28 @@ std::pair<bool, size_t> run(const std::unordered_map<std::string, std::vector<st
     parsed_sql.parse_sql(sql, name);
     auto plan = load_join_pipeline(plan_json["Plan"], parsed_sql);
 
-    auto start   = std::chrono::steady_clock::now();
+    auto prepare_start   = std::chrono::steady_clock::now();
+    Contest::prepare(plan, context);
+    auto prepare_end     = std::chrono::steady_clock::now();
+
+    auto execute_start   = std::chrono::steady_clock::now();
     auto results = Contest::execute(plan, context);
-    auto end     = std::chrono::steady_clock::now();
+    auto execute_end     = std::chrono::steady_clock::now();
 
     auto executed_sql = parsed_sql.executed_sql(sql);
     // fmt::println("{}", executed_sql);
+    auto duckdb_start   = std::chrono::steady_clock::now();
     auto       result = conn.Query(executed_sql);
+    auto duckdb_end   = std::chrono::steady_clock::now();
 
     const auto compare_result = compare(*result, results);
-    fmt::println("Query {} >> \t\t Runtime: {} ms - Result correct: {}",
+    fmt::println("Query {} >> \t\t Runtime: {} ms / DuckDB Runtime: {} ms - Result correct: {}",
         name,
-        std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count(),
+        std::chrono::duration_cast<std::chrono::milliseconds>(execute_end - execute_start).count(),
+        std::chrono::duration_cast<std::chrono::milliseconds>(duckdb_end - duckdb_start).count(),
         compare_result);
    
-    return {compare_result, std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()};
+    return {compare_result, std::chrono::duration_cast<std::chrono::microseconds>(execute_end - execute_start).count()};
 }
 
 int main(int argc, char* argv[]) {

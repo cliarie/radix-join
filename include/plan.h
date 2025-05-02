@@ -339,6 +339,7 @@ namespace Contest {
 void* build_context();
 void  destroy_context(void*);
 
+void prepare(const Plan& plan, void* context);
 ColumnarTable execute(const Plan& plan, void* context);
 
 } // namespace Contest
